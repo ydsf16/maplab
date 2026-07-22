@@ -8,6 +8,12 @@ DEFINE_int32(gyro_matcher_small_search_distance_px, 10,
 DEFINE_int32(gyro_matcher_large_search_distance_px, 20,
     "Large search rectangle size for keypoint matches."
     " Only used if small search was unsuccessful.");
+DEFINE_double(gyro_matcher_matching_bits_ratio_relaxed, 0.8,
+    "Minimum fraction of equal descriptor bits for primary matches.");
+DEFINE_double(gyro_matcher_matching_bits_ratio_strict, 0.85,
+    "Minimum fraction of equal descriptor bits for inferior matches.");
+DEFINE_double(gyro_matcher_lowe_ratio, 0.8,
+    "Maximum best-to-second-best Hamming distance ratio.");
 
 namespace aslam {
 
@@ -31,6 +37,11 @@ GyroTwoFrameMatcher::GyroTwoFrameMatcher(
     matches_kp1_k_(matches_kp1_k),
     is_keypoint_kp1_matched_(kNumPointsKp1, false),
     iteration_processed_keypoints_kp1_(kNumPointsKp1, false),
+    matching_threshold_bits_ratio_relaxed_(
+        FLAGS_gyro_matcher_matching_bits_ratio_relaxed),
+    matching_threshold_bits_ratio_strict_(
+        FLAGS_gyro_matcher_matching_bits_ratio_strict),
+    lowe_ratio_(FLAGS_gyro_matcher_lowe_ratio),
     small_search_distance_px_(FLAGS_gyro_matcher_small_search_distance_px),
     large_search_distance_px_(FLAGS_gyro_matcher_large_search_distance_px) {
   CHECK(frame_kp1.isValid());
@@ -55,6 +66,15 @@ GyroTwoFrameMatcher::GyroTwoFrameMatcher(
   CHECK_GT(small_search_distance_px_, 0);
   CHECK_GT(large_search_distance_px_, 0);
   CHECK_GE(large_search_distance_px_, small_search_distance_px_);
+  CHECK_GT(matching_threshold_bits_ratio_relaxed_, 0.0);
+  CHECK_LT(matching_threshold_bits_ratio_relaxed_, 1.0);
+  CHECK_GT(matching_threshold_bits_ratio_strict_, 0.0);
+  CHECK_LT(matching_threshold_bits_ratio_strict_, 1.0);
+  CHECK_GE(
+      matching_threshold_bits_ratio_strict_,
+      matching_threshold_bits_ratio_relaxed_);
+  CHECK_GT(lowe_ratio_, 0.0);
+  CHECK_LT(lowe_ratio_, 1.0);
 
   descriptors_kp1_wrapped_.reserve(kNumPointsKp1);
   keypoints_kp1_sorted_by_y_.reserve(kNumPointsKp1);
@@ -142,7 +162,7 @@ void GyroTwoFrameMatcher::matchKeypoint(const int idx_k) {
   KeyPointIterator it_best;
   const static unsigned int kDescriptorSizeBits = 8 * kDescriptorSizeBytes;
   int best_score = static_cast<int>(
-      kDescriptorSizeBits * kMatchingThresholdBitsRatioRelaxed);
+      kDescriptorSizeBits * matching_threshold_bits_ratio_relaxed_);
   unsigned int distance_best = kDescriptorSizeBits + 1;
   unsigned int distance_second_best = kDescriptorSizeBits + 1;
   const common::FeatureDescriptorConstRef& descriptor_k =
@@ -300,7 +320,7 @@ bool GyroTwoFrameMatcher::matchInferiorMatches(
     const MatchData& match_data =
         idx_k_to_attempted_match_data_map_[inferior_keypoint_idx_k];
     bool found = false;
-    double best_matching_score = static_cast<double>(kMatchingThresholdBitsRatioStrict);
+    double best_matching_score = matching_threshold_bits_ratio_strict_;
     KeyPointIterator it_best;
 
     for (size_t i = 0u; i < match_data.keypoint_match_candidates_kp1.size(); ++i) {
