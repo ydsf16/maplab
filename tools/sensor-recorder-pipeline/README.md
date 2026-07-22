@@ -9,12 +9,14 @@ bash process.sh single \
   --output ~/data/maplab_results/SR_2026-07-21_12-41-05
 ```
 
-The first implementation provides three stages:
+The pipeline provides four stages:
 
 1. `validate`: validates the recording contract and writes a report.
 2. `normalize`: converts timestamps, poses and raw IMU into a versioned,
    maplab-oriented interchange format.
 3. `create_vimap`: invokes the native `sensor_recorder_to_vimap` executable.
+4. `export_rerun`: writes and verifies a Rerun recording containing the
+   trajectory, camera model, velocity, VIWLS graph and keyframe images.
 
 `create_vimap` requires `ffmpeg`. It decodes the video frames selected by
 `frame_index` and stores one grayscale `kRawImage` resource on every VI-Map
@@ -24,6 +26,11 @@ interval and linearly interpolated measurements at both vertex timestamps.
 The initial vertex velocity is derived from the ARKit position trajectory.
 Gyroscope and accelerometer biases are initialized to zero and are intended to
 be estimated during visual-inertial optimization.
+
+The default command produces both `maps/00_imported/vi_map` and
+`rerun/<recording-name>_vimap.rrd`. Install `rerun-sdk==0.33.0` in the Python
+environment used by `process.sh`, or select another interpreter with
+`RERUN_PYTHON`.
 
 Use `--to normalize` when the native maplab executable has not been built yet.
 Each completed stage has a fingerprint and is skipped on an unchanged rerun.

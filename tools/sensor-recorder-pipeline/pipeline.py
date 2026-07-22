@@ -20,8 +20,8 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Sequence, Tuple
 
 
-PIPELINE_VERSION = "0.2.0"
-STAGES = ("validate", "normalize", "create_vimap")
+PIPELINE_VERSION = "0.3.0"
+STAGES = ("validate", "normalize", "create_vimap", "export_rerun")
 REQUIRED_FILES = (
     "meta.json",
     "arkit_pose.csv",
@@ -697,6 +697,73 @@ def create_vimap(context: Context) -> Dict[str, Any]:
     return report
 
 
+def export_rerun(context: Context) -> Dict[str, Any]:
+    repo_root = Path(__file__).resolve().parents[2]
+    exporter = repo_root / "tools" / "sensor-recorder-pipeline" / "export_vimap_rerun.py"
+    normalized_dir = context.output_dir / "normalized"
+    vimap_report = context.output_dir / "maps" / "00_imported" / "report.json"
+    images_dir = normalized_dir / "keyframe_images"
+    for required in (exporter, normalized_dir / "keyframes.csv", vimap_report):
+        if not required.is_file():
+            raise PipelineError(f"Rerun export input is missing: {required}")
+    if not images_dir.is_dir():
+        raise PipelineError(f"Rerun keyframe image directory is missing: {images_dir}")
+
+    rerun_python = os.environ.get("RERUN_PYTHON", sys.executable)
+    dependency_check = subprocess.run(
+        [rerun_python, "-c", "import rerun"], check=False,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    if dependency_check.returncode != 0:
+        raise PipelineError(
+            f"Rerun SDK is unavailable in {rerun_python}; "
+            "install it with: python3 -m pip install rerun-sdk==0.33.0"
+        )
+
+    output_dir = context.output_dir / "rerun"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / f"{context.data_dir.name}_vimap.rrd"
+    rerun_environment = os.environ.copy()
+    rerun_environment.setdefault("RERUN_TELEMETRY_ENABLED", "0")
+    with tempfile.TemporaryDirectory(prefix="rerun-export-", dir=str(output_dir)) as temp:
+        temporary_output = Path(temp) / output_path.name
+        command = [
+            rerun_python, str(exporter),
+            "--keyframes", str(normalized_dir / "keyframes.csv"),
+            "--report", str(vimap_report),
+            "--config", str(context.config_path),
+            "--images-dir", str(images_dir),
+            "--output", str(temporary_output),
+        ]
+        result = subprocess.run(
+            command, check=False, text=True, env=rerun_environment
+        )
+        if result.returncode != 0:
+            raise PipelineError(
+                f"Rerun export failed with exit code {result.returncode}"
+            )
+        verify = subprocess.run(
+            [rerun_python, "-m", "rerun", "rrd", "verify", str(temporary_output)],
+            check=False, text=True, env=rerun_environment,
+        )
+        if verify.returncode != 0:
+            raise PipelineError(
+                f"Rerun verification failed with exit code {verify.returncode}"
+            )
+        os.replace(temporary_output, output_path)
+
+    report = {
+        "schema_version": 1,
+        "status": "created_and_verified",
+        "output": str(output_path),
+        "size_bytes": output_path.stat().st_size,
+        "images": int(json.loads(vimap_report.read_text(encoding="utf-8"))
+                      ["verified_counts"]["raw_image_resources"]),
+    }
+    atomic_write_json(output_dir / "report.json", report)
+    return report
+
+
 def stage_fingerprint(context: Context, stage: str) -> str:
     digest = hashlib.sha256()
     digest.update(PIPELINE_VERSION.encode("ascii"))
@@ -707,6 +774,9 @@ def stage_fingerprint(context: Context, stage: str) -> str:
         importer = resolve_vimap_importer(context)
         if importer is not None:
             digest.update(sha256_file(Path(importer)).encode("ascii"))
+    elif stage == "export_rerun":
+        exporter = Path(__file__).with_name("export_vimap_rerun.py")
+        digest.update(sha256_file(exporter).encode("ascii"))
     for dependency in STAGES[: STAGES.index(stage)]:
         state = context.manifest.get("stages", {}).get(dependency, {})
         digest.update(str(state.get("fingerprint", "")).encode("ascii"))
@@ -736,6 +806,8 @@ def run_stage(context: Context, stage: str) -> None:
             result = normalize_recording(context)
         elif stage == "create_vimap":
             result = create_vimap(context)
+        elif stage == "export_rerun":
+            result = export_rerun(context)
         else:
             raise AssertionError(stage)
     except BaseException as error:
