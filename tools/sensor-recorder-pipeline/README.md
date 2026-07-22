@@ -102,6 +102,37 @@ The default configuration is `configs/iphone_arkit.json`. It records all frame
 conventions explicitly. Initial camera-to-IMU translation is zero; the initial
 rotation matches Landscape Right capture and is intended to be refined later.
 
+## SuperPoint + LightGlue ONNX frontend
+
+Use `configs/iphone_arkit_640.json` to resize the keyframe images to 640x480.
+The importer scales `fx`, `fy`, `cx`, and `cy` by the same factors and keeps the
+raw recording unchanged.
+
+The validated frontend uses the fixed-size
+`superpoint_2048_lightglue_end2end.onnx` model from LightGlue-ONNX. The model is
+a runtime dependency and is not committed to this repository. Install
+`onnxruntime-gpu[cuda,cudnn]==1.23.2`, `numpy`, and
+`opencv-python-headless`, then set `LIGHTGLUE_ONNX_MODEL` if the model is stored
+outside the default AutoDL path.
+
+```bash
+bash process.sh single \
+  --data /root/data/recorder/SR_2026-07-22_22-24-31 \
+  --output /root/data/maplab_results/SR_2026-07-22_22-24-31 \
+  --config configs/iphone_arkit_640.json \
+  --to create_vimap
+
+bash process.sh superpoint-lightglue \
+  --output /root/data/maplab_results/SR_2026-07-22_22-24-31
+```
+
+The ONNX frontend matches keyframes at offsets 1, 2, and 3, filters matches
+with Essential Matrix RANSAC, creates conflict-free multi-frame tracks, imports
+them as `kSuperPoint` observations, triangulates without BA, and automatically
+exports a verified Rerun recording. The current VI-Map stores a one-byte
+placeholder descriptor per keypoint because subsequent matching remains in the
+external ONNX frontend; keypoints, scores, and track IDs are stored normally.
+
 On AutoDL, the default wrapper runs the native importer inside the isolated
 Ubuntu 20.04/ROS Noetic runtime. Its paths can be overridden with
 `MAPLAB_RUNTIME_ROOT`, `MAPLAB_RUNTIME_WORKSPACE`, and

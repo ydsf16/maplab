@@ -404,7 +404,20 @@ def normalize_recording(context: Context) -> Dict[str, Any]:
     previous_quaternion: Tuple[float, float, float, float] | None = None
     positions: List[List[float]] = []
     times: List[float] = []
+    image_config = config.get("images", {})
     for row in pose_rows:
+        source_width = as_int(row, "width_px", pose_path)
+        source_height = as_int(row, "height_px", pose_path)
+        target_width = int(image_config.get("width_px", source_width))
+        target_height = int(image_config.get("height_px", source_height))
+        if target_width <= 0 or target_height <= 0:
+            raise PipelineError("images.width_px and images.height_px must be positive")
+        scale_x = target_width / source_width
+        scale_y = target_height / source_height
+        if not math.isclose(scale_x, scale_y, rel_tol=0.0, abs_tol=1e-9):
+            raise PipelineError(
+                "configured image size must preserve the source aspect ratio"
+            )
         sensor_sec = as_float(row, "sensor_sec", pose_path)
         rotation_wc = quaternion_to_matrix(
             *(as_float(row, key, pose_path) for key in ("qw", "qx", "qy", "qz"))
@@ -441,12 +454,12 @@ def normalize_recording(context: Context) -> Dict[str, Any]:
                 "v_M_I_x_m_s": "0",
                 "v_M_I_y_m_s": "0",
                 "v_M_I_z_m_s": "0",
-                "fx_px": row["fx_px"],
-                "fy_px": row["fy_px"],
-                "cx_px": row["cx_px"],
-                "cy_px": row["cy_px"],
-                "width_px": row["width_px"],
-                "height_px": row["height_px"],
+                "fx_px": f"{as_float(row, 'fx_px', pose_path) * scale_x:.12g}",
+                "fy_px": f"{as_float(row, 'fy_px', pose_path) * scale_y:.12g}",
+                "cx_px": f"{as_float(row, 'cx_px', pose_path) * scale_x:.12g}",
+                "cy_px": f"{as_float(row, 'cy_px', pose_path) * scale_y:.12g}",
+                "width_px": target_width,
+                "height_px": target_height,
                 "tracking_state": row.get("tracking_state", "unknown"),
             }
         )
@@ -520,7 +533,7 @@ def normalize_recording(context: Context) -> Dict[str, Any]:
     )
 
     intrinsics = {
-        name: statistics.median(as_float(row, name, pose_path) for row in pose_rows)
+        name: statistics.median(float(row[name]) for row in normalized_frames)
         for name in ("fx_px", "fy_px", "cx_px", "cy_px")
     }
     canonical_metadata = {
@@ -545,8 +558,8 @@ def normalize_recording(context: Context) -> Dict[str, Any]:
             "model": config["camera"]["model"],
             "distortion_model": config["camera"]["distortion_model"],
             "reference_intrinsics": intrinsics,
-            "width_px": as_int(pose_rows[0], "width_px", pose_path),
-            "height_px": as_int(pose_rows[0], "height_px", pose_path),
+            "width_px": int(normalized_frames[0]["width_px"]),
+            "height_px": int(normalized_frames[0]["height_px"]),
         },
         "extrinsics": config["extrinsics"],
         "world_alignment": config["world_alignment"],
@@ -586,11 +599,20 @@ def extract_keyframe_images(context: Context, normalized_dir: Path) -> int:
     select_expression = "+".join(
         f"eq(n\\,{frame_index})" for frame_index in frame_indices
     )
+    video_filter = f"select={select_expression}"
+    target_width = image_config.get("width_px")
+    target_height = image_config.get("height_px")
+    if target_width is not None or target_height is not None:
+        if target_width is None or target_height is None:
+            raise PipelineError(
+                "images.width_px and images.height_px must be configured together"
+            )
+        video_filter += f",scale={int(target_width)}:{int(target_height)}"
     command = [
         ffmpeg,
         "-v", "error",
         "-i", str(context.data_dir / "wide.mp4"),
-        "-vf", f"select={select_expression}",
+        "-vf", video_filter,
         "-vsync", "0",
         "-q:v", str(image_config.get("jpeg_quality", 2)),
         str(output_pattern),
