@@ -58,6 +58,31 @@ sensor_recorder_brisk_ba \
   --frontend_max_features=1000
 ```
 
+For 1920x1440 iPhone frames, the validated 10 Hz frontend profile is:
+
+```bash
+sensor_recorder_brisk_ba \
+  --map=/path/to/vi_map \
+  --report=/path/to/report.json \
+  --run_frontend=true \
+  --run_ba=false \
+  --frontend_fast_threshold=5 \
+  --frontend_pyramid_levels=4 \
+  --frontend_nms_radius=2 \
+  --frontend_max_features=2000 \
+  --feature_tracking_detector_orb_num_features=4000 \
+  --gyro_matcher_small_search_distance_px=30 \
+  --gyro_matcher_large_search_distance_px=60 \
+  --gyro_lk_candidate_ratio=0.8 \
+  --gyro_lk_max_pyramid_levels=3 \
+  --gyro_lk_window_size=31
+```
+
+The BRISK matching-bit thresholds and Lowe ratio are also runtime flags:
+`--gyro_matcher_matching_bits_ratio_relaxed`,
+`--gyro_matcher_matching_bits_ratio_strict`, and
+`--gyro_matcher_lowe_ratio`.
+
 The frontend report contains every frame's detected keypoint count and every
 adjacent frame pair's RANSAC inlier/outlier counts. When this report is passed
 to `export_vimap_rerun.py`, the same values are available as Rerun scalar

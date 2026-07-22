@@ -182,12 +182,12 @@ class GyroTwoFrameMatcher {
 
   // Two descriptors could match if the number of matching bits normalized
   // with the descriptor length in bits is higher than this threshold.
-  static constexpr float kMatchingThresholdBitsRatioRelaxed = 0.8f;
+  const double matching_threshold_bits_ratio_relaxed_;
   // The more strict threshold is used for matching inferior matches.
   // It is more strict because there is no ratio test anymore.
-  static constexpr float kMatchingThresholdBitsRatioStrict = 0.85f;
+  const double matching_threshold_bits_ratio_strict_;
   // Two descriptors could match if they pass the Lowe ratio test.
-  static constexpr float kLoweRatio = 0.8f;
+  const double lowe_ratio_;
   // Small image space distances for keypoint matches.
   const int small_search_distance_px_;
   // Large image space distances for keypoint matches.
@@ -247,7 +247,7 @@ inline bool GyroTwoFrameMatcher::ratioTest(
     return true;
   } else {
     return distance_closest/static_cast<float>(distance_second_closest) <
-        kLoweRatio;
+        lowe_ratio_;
   }
 }
 

@@ -22,6 +22,16 @@
 #include <vi-map/vertex.h>
 #include <vi-map-helpers/vi-map-manipulation.h>
 
+DECLARE_int32(feature_tracking_detector_orb_num_features);
+DECLARE_int32(gyro_matcher_small_search_distance_px);
+DECLARE_int32(gyro_matcher_large_search_distance_px);
+DECLARE_double(gyro_matcher_matching_bits_ratio_relaxed);
+DECLARE_double(gyro_matcher_matching_bits_ratio_strict);
+DECLARE_double(gyro_matcher_lowe_ratio);
+DECLARE_double(gyro_lk_candidate_ratio);
+DECLARE_int32(gyro_lk_window_size);
+DECLARE_int32(gyro_lk_max_pyramid_levels);
+
 DEFINE_string(map, "", "VI-Map folder to process in place.");
 DEFINE_string(report, "", "Path to write the frontend and BA JSON report.");
 DEFINE_int32(ba_iterations, 30, "Maximum number of visual BA iterations.");
@@ -160,7 +170,26 @@ void writeReport(
          << ",\n"
          << "    \"nms_radius_px\": " << FLAGS_frontend_nms_radius
          << ",\n"
-         << "    \"max_features\": " << FLAGS_frontend_max_features << "\n"
+         << "    \"max_features\": " << FLAGS_frontend_max_features
+         << ",\n"
+         << "    \"orb_candidate_features\": "
+         << FLAGS_feature_tracking_detector_orb_num_features << ",\n"
+         << "    \"matcher_small_search_px\": "
+         << FLAGS_gyro_matcher_small_search_distance_px << ",\n"
+         << "    \"matcher_large_search_px\": "
+         << FLAGS_gyro_matcher_large_search_distance_px << ",\n"
+         << "    \"matching_bits_ratio_relaxed\": "
+         << FLAGS_gyro_matcher_matching_bits_ratio_relaxed << ",\n"
+         << "    \"matching_bits_ratio_strict\": "
+         << FLAGS_gyro_matcher_matching_bits_ratio_strict << ",\n"
+         << "    \"lowe_ratio\": " << FLAGS_gyro_matcher_lowe_ratio
+         << ",\n"
+         << "    \"lk_candidate_ratio\": " << FLAGS_gyro_lk_candidate_ratio
+         << ",\n"
+         << "    \"lk_window_size\": " << FLAGS_gyro_lk_window_size
+         << ",\n"
+         << "    \"lk_max_pyramid_levels\": "
+         << FLAGS_gyro_lk_max_pyramid_levels << "\n"
          << "  },\n"
          << "  \"frame_keypoint_counts\": [";
   for (size_t index = 0u; index < frame_keypoint_counts.size(); ++index) {
