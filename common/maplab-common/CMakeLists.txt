@@ -44,6 +44,7 @@ target_link_libraries(${PROJECT_NAME} ${CMAKE_THREAD_LIBS_INIT} ${PYTHON_LIBRARI
 #############
 ## TESTING ##
 #############
+if(CATKIN_ENABLE_TESTING)
 SET(PROJECT_TEST_DATA "maplab_test_data")
 add_custom_target(${PROJECT_TEST_DATA})
 add_custom_command(TARGET ${PROJECT_TEST_DATA}
@@ -130,6 +131,7 @@ target_link_libraries(test_interpolation_helpers ${PROJECT_NAME})
 catkin_Add_gtest(test_signals
   test/test-signals.cc)
 target_link_libraries(test_signals ${PROJECT_NAME})
+endif()
 
 ############
 ## EXPORT ##
