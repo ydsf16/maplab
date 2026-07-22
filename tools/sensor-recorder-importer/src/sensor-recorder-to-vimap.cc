@@ -19,6 +19,8 @@
 #include <gflags/gflags.h>
 #include <glog/logging.h>
 #include <maplab-common/file-system-tools.h>
+#include <map-resources/resource-common.h>
+#include <opencv2/imgcodecs.hpp>
 #include <sensors/imu.h>
 #include <vi-map/check-map-consistency.h>
 #include <vi-map/sensor-manager.h>
@@ -51,6 +53,7 @@ struct Keyframe {
   double cy;
   uint32_t width;
   uint32_t height;
+  std::string image_path;
 };
 
 struct ImuSample {
@@ -151,6 +154,10 @@ std::vector<Keyframe> readKeyframes(const std::string& path) {
         static_cast<uint32_t>(int64Value(table, row, "width_px"));
     keyframe.height =
         static_cast<uint32_t>(int64Value(table, row, "height_px"));
+    const auto image_path_column = table.columns.find("image_path");
+    if (image_path_column != table.columns.end()) {
+      keyframe.image_path = row.at(image_path_column->second);
+    }
     if (!keyframes.empty()) {
       CHECK_GT(keyframe.timestamp_ns, keyframes.back().timestamp_ns)
           << "Keyframe timestamps must be strictly increasing.";
@@ -182,6 +189,49 @@ std::vector<ImuSample> readImu(const std::string& path) {
   }
   CHECK_GE(samples.size(), 2u);
   return samples;
+}
+
+ImuSample interpolateImuSample(
+    const std::vector<ImuSample>& samples, const int64_t timestamp_ns) {
+  const auto upper = std::lower_bound(
+      samples.begin(), samples.end(), timestamp_ns,
+      [](const ImuSample& sample, const int64_t timestamp) {
+        return sample.timestamp_ns < timestamp;
+      });
+  CHECK(upper != samples.end()) << "IMU does not cover edge end timestamp.";
+  if (upper->timestamp_ns == timestamp_ns) {
+    return *upper;
+  }
+  CHECK(upper != samples.begin()) << "IMU does not cover edge start timestamp.";
+  const ImuSample& right = *upper;
+  const ImuSample& left = *(upper - 1);
+  const double alpha = static_cast<double>(timestamp_ns - left.timestamp_ns) /
+                       static_cast<double>(right.timestamp_ns - left.timestamp_ns);
+  ImuSample result;
+  result.timestamp_ns = timestamp_ns;
+  result.measurement =
+      (1.0 - alpha) * left.measurement + alpha * right.measurement;
+  return result;
+}
+
+std::vector<ImuSample> imuSamplesForEdge(
+    const std::vector<ImuSample>& samples, const int64_t start_timestamp_ns,
+    const int64_t end_timestamp_ns) {
+  CHECK_LT(start_timestamp_ns, end_timestamp_ns);
+  std::vector<ImuSample> edge_samples;
+  edge_samples.emplace_back(interpolateImuSample(samples, start_timestamp_ns));
+  auto sample = std::upper_bound(
+      samples.begin(), samples.end(), start_timestamp_ns,
+      [](const int64_t timestamp, const ImuSample& candidate) {
+        return timestamp < candidate.timestamp_ns;
+      });
+  for (; sample != samples.end() && sample->timestamp_ns < end_timestamp_ns;
+       ++sample) {
+    edge_samples.emplace_back(*sample);
+  }
+  edge_samples.emplace_back(interpolateImuSample(samples, end_timestamp_ns));
+  CHECK_GE(edge_samples.size(), 2u);
+  return edge_samples;
 }
 
 struct Calibration {
@@ -287,6 +337,7 @@ int main(int argc, char** argv) {
   imu_sensor->setGravityMagnitude(calibration.gravity_m_s2);
 
   vi_map::VIMap map(FLAGS_output_map);
+  map.useMapResourceFolder();
   map.getSensorManager().addSensorAsBase<vi_map::Imu>(std::move(imu_sensor));
   map.getSensorManager().addSensor<aslam::NCamera>(
       std::move(ncamera), imu_sensor_id, aslam::Transformation());
@@ -306,15 +357,10 @@ int main(int argc, char** argv) {
       map.getSensorManager().getSensorPtr<aslam::NCamera>(ncamera_id);
   CHECK(camera_rig);
 
-  size_t previous_edge_last_imu_index = 0u;
-  while (
-      previous_edge_last_imu_index + 1u < imu_samples.size() &&
-      imu_samples[previous_edge_last_imu_index + 1u].timestamp_ns <=
-          keyframes.front().timestamp_ns) {
-    ++previous_edge_last_imu_index;
-  }
-
   pose_graph::VertexId previous_vertex_id;
+  std::vector<pose_graph::VertexId> vertex_ids;
+  vertex_ids.reserve(keyframes.size());
+  size_t raw_image_resource_count = 0u;
   for (size_t keyframe_index = 0u; keyframe_index < keyframes.size();
        ++keyframe_index) {
     const Keyframe& keyframe = keyframes[keyframe_index];
@@ -329,32 +375,35 @@ int main(int argc, char** argv) {
         mission_id));
     vertex->set_T_M_I(transformationFromKeyframe(keyframe));
     vertex->set_v_M(keyframe.velocity);
+    vi_map::Vertex* vertex_ptr = vertex.get();
     map.addVertex(std::move(vertex));
+    vertex_ids.emplace_back(vertex_id);
+
+    if (!keyframe.image_path.empty()) {
+      const std::string image_path = common::concatenateFolderAndFileName(
+          FLAGS_normalized_data, keyframe.image_path);
+      const cv::Mat image = cv::imread(image_path, cv::IMREAD_GRAYSCALE);
+      CHECK(!image.empty()) << "Unable to load keyframe image: " << image_path;
+      CHECK_EQ(static_cast<uint32_t>(image.cols), keyframe.width);
+      CHECK_EQ(static_cast<uint32_t>(image.rows), keyframe.height);
+      map.storeFrameResource(
+          image, 0u, backend::ResourceType::kRawImage, vertex_ptr);
+      ++raw_image_resource_count;
+    }
 
     if (keyframe_index == 0u) {
       map.getMission(mission_id).setRootVertexId(vertex_id);
     } else {
-      size_t edge_last_imu_index = previous_edge_last_imu_index;
-      while (
-          edge_last_imu_index + 1u < imu_samples.size() &&
-          imu_samples[edge_last_imu_index].timestamp_ns <
-              keyframe.timestamp_ns) {
-        ++edge_last_imu_index;
-      }
-      CHECK_GE(
-          imu_samples[edge_last_imu_index].timestamp_ns,
+      const std::vector<ImuSample> edge_samples = imuSamplesForEdge(
+          imu_samples, keyframes[keyframe_index - 1u].timestamp_ns,
           keyframe.timestamp_ns);
-      CHECK_GT(edge_last_imu_index, previous_edge_last_imu_index)
-          << "Each VIWLS edge needs at least two IMU samples.";
-      const size_t measurement_count =
-          edge_last_imu_index - previous_edge_last_imu_index + 1u;
+      const size_t measurement_count = edge_samples.size();
       Eigen::Matrix<int64_t, 1, Eigen::Dynamic> imu_timestamps(
           1, measurement_count);
       Eigen::Matrix<double, 6, Eigen::Dynamic> imu_measurements(
           6, measurement_count);
       for (size_t offset = 0u; offset < measurement_count; ++offset) {
-        const ImuSample& sample =
-            imu_samples[previous_edge_last_imu_index + offset];
+        const ImuSample& sample = edge_samples[offset];
         imu_timestamps(offset) = sample.timestamp_ns;
         imu_measurements.col(offset) = sample.measurement;
       }
@@ -363,7 +412,6 @@ int main(int argc, char** argv) {
       map.addEdge(vi_map::ViwlsEdge::UniquePtr(new vi_map::ViwlsEdge(
           edge_id, previous_vertex_id, vertex_id, imu_timestamps,
           imu_measurements)));
-      previous_edge_last_imu_index = edge_last_imu_index;
     }
     previous_vertex_id = vertex_id;
   }
@@ -380,10 +428,22 @@ int main(int argc, char** argv) {
   CHECK(vi_map::checkMapConsistency(reloaded_map));
   CHECK_EQ(reloaded_map.numVertices(), keyframes.size());
   CHECK_EQ(reloaded_map.numEdges(), keyframes.size() - 1u);
+  size_t reloaded_image_count = 0u;
+  for (const pose_graph::VertexId& vertex_id : vertex_ids) {
+    const vi_map::Vertex& vertex = reloaded_map.getVertex(vertex_id);
+    cv::Mat image;
+    if (reloaded_map.getFrameResource(
+            vertex, 0u, backend::ResourceType::kRawImage, &image)) {
+      CHECK(!image.empty());
+      ++reloaded_image_count;
+    }
+  }
+  CHECK_EQ(reloaded_image_count, raw_image_resource_count);
 
   LOG(INFO) << "Created and reloaded VI-Map with "
             << reloaded_map.numVertices() << " vertices and "
             << reloaded_map.numEdges() << " VIWLS edges at "
-            << FLAGS_output_map;
+            << FLAGS_output_map << " with " << reloaded_image_count
+            << " raw image resources";
   return 0;
 }

@@ -15,6 +15,10 @@
     "model": "pinhole",
     "distortion_model": "none"
   },
+  "images": {
+    "enabled": true,
+    "jpeg_quality": 2
+  },
   "extrinsics": {
     "convention": "T_camera_imu",
     "rotation": [

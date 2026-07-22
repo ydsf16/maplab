@@ -91,9 +91,13 @@ class PipelineIntegrationTest(unittest.TestCase):
                         writer.writerow(row)
 
             config = Path(__file__).resolve().parents[2] / "configs" / "iphone_arkit.json"
+            test_config = root / "config.json"
+            config_value = json.loads(config.read_text(encoding="utf-8"))
+            config_value["images"]["enabled"] = False
+            test_config.write_text(json.dumps(config_value), encoding="utf-8")
             arguments = [
                 "single", "--data", str(recording), "--output", str(output),
-                "--config", str(config), "--to", "normalize",
+                "--config", str(test_config), "--to", "normalize",
             ]
             self.assertEqual(pipeline.main(arguments), 0)
             self.assertEqual(pipeline.main(arguments), 0)
@@ -122,7 +126,7 @@ class PipelineIntegrationTest(unittest.TestCase):
             fake_importer.chmod(0o755)
             full_arguments = [
                 "single", "--data", str(recording), "--output", str(output),
-                "--config", str(config), "--vimap-importer", str(fake_importer),
+                "--config", str(test_config), "--vimap-importer", str(fake_importer),
             ]
             self.assertEqual(pipeline.main(full_arguments), 0)
             self.assertEqual(pipeline.main(full_arguments), 0)
@@ -133,6 +137,7 @@ class PipelineIntegrationTest(unittest.TestCase):
             )
             self.assertEqual(report["verified_counts"]["vertices"], 3)
             self.assertEqual(report["verified_counts"]["viwls_edges"], 2)
+            self.assertEqual(report["verified_counts"]["raw_image_resources"], 0)
 
 
 if __name__ == "__main__":
