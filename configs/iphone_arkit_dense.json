@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "input": {
+    "format": "sensor_recorder_pro",
+    "format_versions": [1]
+  },
+  "keyframes": {
+    "stride": 1,
+    "require_imu_coverage": true
+  },
+  "timestamp": {
+    "camera_imu_offset_sec": 0.0
+  },
+  "camera": {
+    "model": "pinhole",
+    "distortion_model": "none"
+  },
+  "images": {
+    "enabled": true,
+    "jpeg_quality": 2
+  },
+  "extrinsics": {
+    "convention": "T_camera_imu",
+    "rotation": [
+      [0.0, -1.0, 0.0],
+      [-1.0, 0.0, 0.0],
+      [0.0, 0.0, -1.0]
+    ],
+    "translation_m": [0.0, 0.0, 0.0]
+  },
+  "world_alignment": {
+    "source": "arkit_gravity_y_up",
+    "target": "maplab_gravity_negative_z",
+    "rotation_target_from_source": [
+      [1.0, 0.0, 0.0],
+      [0.0, 0.0, -1.0],
+      [0.0, 1.0, 0.0]
+    ]
+  },
+  "imu": {
+    "gravity_m_s2": 9.80665,
+    "accelerometer_to_specific_force_sign": -1.0,
+    "pairing_tolerance_sec": 0.005,
+    "noise_model_status": "provisional",
+    "gyro_noise_density": 0.0015,
+    "gyro_bias_random_walk_noise_density": 0.0001,
+    "acc_noise_density": 0.02,
+    "acc_bias_random_walk_noise_density": 0.001
+  }
+}

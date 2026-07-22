@@ -53,6 +53,11 @@ def parse_arguments() -> argparse.Namespace:
         type=Path,
         help="CSV directory produced by sensor_recorder_vimap_export",
     )
+    parser.add_argument(
+        "--include-bad-landmarks",
+        action="store_true",
+        help="Include landmarks rejected by Maplab quality checks in the 3D view.",
+    )
     return parser.parse_args()
 
 
@@ -282,7 +287,7 @@ def write_rerun(
             ),
             static=True,
         )
-    if len(bad_landmarks):
+    if args.include_bad_landmarks and len(bad_landmarks):
         rr.log(
             "world/debug/bad_landmarks",
             rr.Points3D(
