@@ -451,6 +451,8 @@ int main(int argc, char** argv) {
       std::sqrt(squared_gyro_bias_delta_sum / vertex_ids.size());
 
   CHECK(vi_map::checkMapConsistency(map));
+  const TriangulationStats post_ba_triangulation_stats =
+      computeTriangulationStats(map);
   backend::SaveConfig save_config;
   save_config.overwrite_existing_files = true;
   CHECK(vi_map::serialization::saveMapToFolder(
@@ -461,7 +463,7 @@ int main(int argc, char** argv) {
       outlier_match_count, map.numLandmarks(), initial_summary.initial_cost,
       final_summary.final_cost, total_iterations, rms_pose_delta,
       max_pose_delta, rms_velocity_delta, rms_accel_bias_delta,
-      rms_gyro_bias_delta, triangulation_stats, frame_keypoint_counts,
+      rms_gyro_bias_delta, post_ba_triangulation_stats, frame_keypoint_counts,
       pair_stats);
   LOG(INFO) << "BRISK frontend and "
             << (FLAGS_use_imu ? "visual-inertial" : "visual")
