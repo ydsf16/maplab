@@ -113,21 +113,37 @@ void OptimizationProblem::applyGaugeFixesForInitialVertices(
     // part of the problem) and fix the open degrees of freedom.
     const vi_map::MissionId& first_mission_id = *missionids_of_cluster.begin();
 
-    pose_graph::VertexId current_vertex_id =
-        map_->getMission(first_mission_id).getRootVertexId();
     pose_graph::VertexId first_vertex_id_in_problem;
-    do {
-      CHECK(current_vertex_id.isValid());
-      if (problem_books_.keyframes_in_problem.count(current_vertex_id) > 0u) {
-        first_vertex_id_in_problem = current_vertex_id;
+    double* first_vertex_state = nullptr;
+    for (const vi_map::MissionId& mission_id : missionids_of_cluster) {
+      pose_graph::VertexId current_vertex_id =
+          map_->getMission(mission_id).getRootVertexId();
+      do {
+        CHECK(current_vertex_id.isValid());
+        if (problem_books_.keyframes_in_problem.count(current_vertex_id) >
+            0u) {
+          double* candidate_state =
+              state_buffer_.get_vertex_q_IM__M_p_MI_JPL(current_vertex_id);
+          if (problem_information_.parameterizations.count(candidate_state) >
+              0u) {
+            first_vertex_id_in_problem = current_vertex_id;
+            first_vertex_state = candidate_state;
+            break;
+          }
+        }
+      } while (map_->getNextVertex(current_vertex_id, &current_vertex_id));
+      if (first_vertex_id_in_problem.isValid()) {
         break;
       }
-    } while (map_->getNextVertex(current_vertex_id, &current_vertex_id));
+    }
     CHECK(first_vertex_id_in_problem.isValid());
+    CHECK_NOTNULL(first_vertex_state);
+    const vi_map::MissionBaseFrameId baseframe_id =
+        map_->getMissionBaseFrameForMission(first_mission_id).id();
+    double* baseframe_state =
+        state_buffer_.get_baseframe_q_GM__G_p_GM_JPL(baseframe_id);
     fixOpenDoFOfInitialVertex(
-        state_buffer_.get_vertex_q_IM__M_p_MI_JPL(first_vertex_id_in_problem),
-        state_buffer_.get_baseframe_q_GM__G_p_GM_JPL(
-            map_->getMissionBaseFrameForMission(first_mission_id).id()),
+        first_vertex_state, baseframe_state,
         new_cluster_fix.rotation_dof_fixed, new_cluster_fix.position_dof_fixed,
         &problem_information_);
 
@@ -145,21 +161,30 @@ void OptimizationProblem::applyGaugeFixesForInitialVertices(
     // Fix scale of mission cluster by fixing a landmark expressed in the
     // vertex of the first vertex of the first mission in the cluster.
     if (new_cluster_fix.scale_fixed) {
-      const vi_map::LandmarkStore& landmark_store_first_vertex =
-          map_->getVertex(first_vertex_id_in_problem).getLandmarks();
-
       vi_map::LandmarkId first_landmark_of_first_mission;
-      for (const vi_map::Landmark& landmark : landmark_store_first_vertex) {
-        if (problem_books_.landmarks_in_problem.count(landmark.id()) > 0u) {
-          first_landmark_of_first_mission = landmark.id();
+      for (const vi_map::MissionId& mission_id : missionids_of_cluster) {
+        pose_graph::VertexIdList vertex_ids;
+        map_->getAllVertexIdsInMissionAlongGraph(mission_id, &vertex_ids);
+        for (const pose_graph::VertexId& vertex_id : vertex_ids) {
+          const vi_map::LandmarkStore& landmark_store =
+              map_->getVertex(vertex_id).getLandmarks();
+          for (const vi_map::Landmark& landmark : landmark_store) {
+            if (problem_books_.landmarks_in_problem.count(landmark.id()) >
+                0u) {
+              first_landmark_of_first_mission = landmark.id();
+              break;
+            }
+          }
+          if (first_landmark_of_first_mission.isValid()) {
+            break;
+          }
+        }
+        if (first_landmark_of_first_mission.isValid()) {
           break;
         }
       }
-      // TODO(schneith): Loop over the vertices if the first one does not
-      // see any landmarks.
       CHECK(first_landmark_of_first_mission.isValid())
-          << "The first vertex has no landmarks. This case is not supported "
-          << "right now. Consider extending this function.";
+          << "The mission cluster has no landmarks in the problem.";
 
       problem_information_.setParameterBlockConstantIfPartOfTheProblem(
           map_->getLandmark(first_landmark_of_first_mission).get_p_B_Mutable());
