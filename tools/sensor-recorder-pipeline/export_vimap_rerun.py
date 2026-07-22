@@ -120,6 +120,8 @@ def main() -> None:
     velocities = np.asarray(
         [[float(row[f"v_M_I_{axis}_m_s"]) for axis in "xyz"] for row in rows]
     )
+    accel_biases = np.zeros((len(rows), 3), dtype=np.float64)
+    gyro_biases = np.zeros((len(rows), 3), dtype=np.float64)
     rotations = np.asarray(
         [
             quaternion_matrix(
@@ -148,6 +150,18 @@ def main() -> None:
         )
         velocities = np.asarray(
             [[float(row[f"v_{axis}_m_s"]) for axis in "xyz"] for row in optimized_rows]
+        )
+        accel_biases = np.asarray(
+            [
+                [float(row[f"accel_bias_{axis}"]) for axis in "xyz"]
+                for row in optimized_rows
+            ]
+        )
+        gyro_biases = np.asarray(
+            [
+                [float(row[f"gyro_bias_{axis}"]) for axis in "xyz"]
+                for row in optimized_rows
+            ]
         )
         rotations = np.asarray(
             [
@@ -192,7 +206,8 @@ def main() -> None:
         images = load_keyframe_images(args, rows)
         write_rerun(
             args, rows, report, config, initial_positions, positions, velocities,
-            rotations, initial_edge_segments, edge_segments, landmarks,
+            accel_biases, gyro_biases, rotations, initial_edge_segments,
+            edge_segments, landmarks,
             bad_landmarks, keypoints_by_vertex, frame_keypoint_counts,
             pair_match_counts, r_imu_camera, t_imu_camera, images,
         )
@@ -201,7 +216,8 @@ def main() -> None:
             images = extract_keyframe_images(args.video, rows, Path(temp_dir))
             write_rerun(
                 args, rows, report, config, initial_positions, positions, velocities,
-                rotations, initial_edge_segments, edge_segments, landmarks,
+                accel_biases, gyro_biases, rotations, initial_edge_segments,
+                edge_segments, landmarks,
                 bad_landmarks, keypoints_by_vertex, frame_keypoint_counts,
                 pair_match_counts, r_imu_camera, t_imu_camera, images,
             )
@@ -220,6 +236,8 @@ def write_rerun(
     initial_positions: np.ndarray,
     positions: np.ndarray,
     velocities: np.ndarray,
+    accel_biases: np.ndarray,
+    gyro_biases: np.ndarray,
     rotations: np.ndarray,
     initial_edge_segments: np.ndarray,
     edge_segments: np.ndarray,
@@ -369,6 +387,23 @@ def write_rerun(
         if pair is not None:
             rr.log("frontend/pair_inliers", rr.Scalars(float(pair["inliers"])))
             rr.log("frontend/pair_outliers", rr.Scalars(float(pair["outliers"])))
+        for axis_index, axis in enumerate("xyz"):
+            rr.log(
+                f"state/imu_bias/accelerometer/{axis}_m_s2",
+                rr.Scalars(float(accel_biases[index, axis_index])),
+            )
+            rr.log(
+                f"state/imu_bias/gyroscope/{axis}_rad_s",
+                rr.Scalars(float(gyro_biases[index, axis_index])),
+            )
+        rr.log(
+            "state/imu_bias/accelerometer/norm_m_s2",
+            rr.Scalars(float(np.linalg.norm(accel_biases[index]))),
+        )
+        rr.log(
+            "state/imu_bias/gyroscope/norm_rad_s",
+            rr.Scalars(float(np.linalg.norm(gyro_biases[index]))),
+        )
         if index in keypoints_by_vertex:
             matched, unmatched = keypoints_by_vertex[index]
             if len(unmatched):
