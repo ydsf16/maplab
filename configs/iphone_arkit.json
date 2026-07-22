@@ -39,6 +39,7 @@
   },
   "imu": {
     "gravity_m_s2": 9.80665,
+    "accelerometer_to_specific_force_sign": -1.0,
     "pairing_tolerance_sec": 0.005,
     "noise_model_status": "provisional",
     "gyro_noise_density": 0.0015,

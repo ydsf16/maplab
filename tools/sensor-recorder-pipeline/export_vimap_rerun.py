@@ -34,6 +34,11 @@ def load_keyframes(path: Path) -> list[dict[str, str]]:
     return rows
 
 
+def load_csv(path: Path) -> list[dict[str, str]]:
+    with path.open("r", newline="", encoding="utf-8-sig") as stream:
+        return list(csv.DictReader(stream))
+
+
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Export an imported VI-Map to Rerun.")
     parser.add_argument("--keyframes", required=True, type=Path)
@@ -43,6 +48,11 @@ def parse_arguments() -> argparse.Namespace:
     image_source.add_argument("--video", type=Path)
     image_source.add_argument("--images-dir", type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument(
+        "--optimized-dir",
+        type=Path,
+        help="CSV directory produced by sensor_recorder_vimap_export",
+    )
     return parser.parse_args()
 
 
@@ -94,13 +104,14 @@ def main() -> None:
     rows = load_keyframes(args.keyframes)
     report = json.loads(args.report.read_text(encoding="utf-8"))
     config = json.loads(args.config.read_text(encoding="utf-8"))
-    verified = report["verified_counts"]
-    if len(rows) != int(verified["vertices"]):
+    verified = report.get("verified_counts")
+    if verified is not None and len(rows) != int(verified["vertices"]):
         raise ValueError("keyframe count does not match the reloaded VI-Map report")
 
-    positions = np.asarray(
+    initial_positions = np.asarray(
         [[float(row[f"p_M_I_{axis}_m"]) for axis in "xyz"] for row in rows]
     )
+    positions = initial_positions.copy()
     velocities = np.asarray(
         [[float(row[f"v_M_I_{axis}_m_s"]) for axis in "xyz"] for row in rows]
     )
@@ -115,7 +126,45 @@ def main() -> None:
             for row in rows
         ]
     )
+    landmarks = np.empty((0, 3), dtype=np.float64)
+    keypoints_by_vertex: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+    if args.optimized_dir is not None:
+        optimized_rows = load_csv(args.optimized_dir / "vertices.csv")
+        if len(optimized_rows) != len(rows):
+            raise ValueError("optimized vertex count does not match keyframes")
+        positions = np.asarray(
+            [[float(row[f"p_{axis}_m"]) for axis in "xyz"] for row in optimized_rows]
+        )
+        velocities = np.asarray(
+            [[float(row[f"v_{axis}_m_s"]) for axis in "xyz"] for row in optimized_rows]
+        )
+        rotations = np.asarray(
+            [
+                quaternion_matrix(
+                    float(row["q_w"]), float(row["q_x"]),
+                    float(row["q_y"]), float(row["q_z"]),
+                )
+                for row in optimized_rows
+            ]
+        )
+        landmark_rows = load_csv(args.optimized_dir / "landmarks.csv")
+        landmarks = np.asarray(
+            [[float(row[f"{axis}_m"]) for axis in "xyz"] for row in landmark_rows]
+        )
+        grouped: dict[int, list[tuple[float, float, bool]]] = {}
+        for row in load_csv(args.optimized_dir / "keypoints.csv"):
+            grouped.setdefault(int(row["vertex_index"]), []).append(
+                (float(row["u_px"]), float(row["v_px"]), row["has_landmark"] == "1")
+            )
+        for vertex_index, points in grouped.items():
+            matched = np.asarray([[u, v] for u, v, valid in points if valid])
+            unmatched = np.asarray([[u, v] for u, v, valid in points if not valid])
+            keypoints_by_vertex[vertex_index] = (matched, unmatched)
+
     edge_segments = np.stack([positions[:-1], positions[1:]], axis=1)
+    initial_edge_segments = np.stack(
+        [initial_positions[:-1], initial_positions[1:]], axis=1
+    )
 
     r_camera_imu = np.asarray(config["extrinsics"]["rotation"], dtype=np.float64)
     t_camera_imu = np.asarray(config["extrinsics"]["translation_m"], dtype=np.float64)
@@ -125,13 +174,19 @@ def main() -> None:
     args.output.parent.mkdir(parents=True, exist_ok=True)
     if args.images_dir is not None:
         images = load_keyframe_images(args, rows)
-        write_rerun(args, rows, report, config, positions, velocities, rotations,
-                    edge_segments, r_imu_camera, t_imu_camera, images)
+        write_rerun(
+            args, rows, report, config, initial_positions, positions, velocities,
+            rotations, initial_edge_segments, edge_segments, landmarks,
+            keypoints_by_vertex, r_imu_camera, t_imu_camera, images,
+        )
     else:
         with tempfile.TemporaryDirectory(prefix="vimap-rerun-images-") as temp_dir:
             images = extract_keyframe_images(args.video, rows, Path(temp_dir))
-            write_rerun(args, rows, report, config, positions, velocities, rotations,
-                        edge_segments, r_imu_camera, t_imu_camera, images)
+            write_rerun(
+                args, rows, report, config, initial_positions, positions, velocities,
+                rotations, initial_edge_segments, edge_segments, landmarks,
+                keypoints_by_vertex, r_imu_camera, t_imu_camera, images,
+            )
 
     print(
         f"wrote {args.output} with {len(rows)} vertices, "
@@ -144,18 +199,28 @@ def write_rerun(
     rows: list[dict[str, str]],
     report: dict,
     config: dict,
+    initial_positions: np.ndarray,
     positions: np.ndarray,
     velocities: np.ndarray,
     rotations: np.ndarray,
+    initial_edge_segments: np.ndarray,
     edge_segments: np.ndarray,
+    landmarks: np.ndarray,
+    keypoints_by_vertex: dict[int, tuple[np.ndarray, np.ndarray]],
     r_imu_camera: np.ndarray,
     t_imu_camera: np.ndarray,
     images: list[Path],
 ) -> None:
-    verified = report["verified_counts"]
     rr.init("sensor_recorder_vimap", spawn=False)
     rr.save(str(args.output))
     rr.log("world", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
+    rr.log(
+        "world/pose_graph/initial",
+        rr.LineStrips3D(
+            initial_edge_segments, colors=[130, 130, 130], radii=0.0015,
+        ),
+        static=True,
+    )
     rr.log(
         "world/pose_graph/vertices",
         rr.Points3D(
@@ -191,6 +256,16 @@ def write_rerun(
         ),
         static=True,
     )
+    if len(landmarks):
+        rr.log(
+            "world/landmarks",
+            rr.Points3D(
+                landmarks,
+                colors=[255, 190, 70],
+                radii=rr.Radius.ui_points(2.0),
+            ),
+            static=True,
+        )
     rr.log(
         "world/imu/camera",
         rr.Transform3D(
@@ -205,9 +280,10 @@ def write_rerun(
         rr.TextDocument(
             "\n".join(
                 [
-                    f"VI-Map: {report['output_map']}",
-                    f"vertices: {verified['vertices']}",
-                    f"VIWLS edges: {verified['viwls_edges']}",
+                    f"VI-Map: {report.get('output_map', 'optimized VI-Map')}",
+                    f"vertices: {len(rows)}",
+                    f"VIWLS edges: {len(rows) - 1}",
+                    f"landmarks: {len(landmarks)}",
                     f"raw images: {len(images)}",
                     "pose: T_M_I, meters",
                     "camera: OpenCV RDF",
@@ -251,6 +327,26 @@ def write_rerun(
             ),
         )
         rr.log("world/imu/camera/image", rr.EncodedImage(path=image))
+        if index in keypoints_by_vertex:
+            matched, unmatched = keypoints_by_vertex[index]
+            if len(unmatched):
+                rr.log(
+                    "world/imu/camera/image/keypoints/unmatched",
+                    rr.Points2D(
+                        unmatched,
+                        colors=[130, 170, 255],
+                        radii=rr.Radius.ui_points(2.0),
+                    ),
+                )
+            if len(matched):
+                rr.log(
+                    "world/imu/camera/image/keypoints/landmark_observations",
+                    rr.Points2D(
+                        matched,
+                        colors=[80, 255, 120],
+                        radii=rr.Radius.ui_points(3.0),
+                    ),
+                )
 
     rr.disconnect()
 

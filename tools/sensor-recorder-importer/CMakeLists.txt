@@ -11,6 +11,8 @@ cs_add_executable(sensor_recorder_to_vimap
                   src/sensor-recorder-to-vimap.cc)
 cs_add_executable(sensor_recorder_brisk_ba
                   src/sensor-recorder-brisk-ba.cc)
+cs_add_executable(sensor_recorder_vimap_export
+                  src/sensor-recorder-vimap-export.cc)
 
 cs_install()
 cs_export()
