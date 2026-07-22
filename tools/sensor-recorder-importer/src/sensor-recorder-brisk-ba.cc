@@ -33,6 +33,18 @@ DEFINE_bool(
     "Optimize camera-IMU rotation and translation during BA.");
 DEFINE_bool(optimize_biases, true, "Optimize accelerometer and gyro biases.");
 DEFINE_bool(optimize_velocity, true, "Optimize keyframe velocities.");
+DEFINE_int32(
+    frontend_fast_threshold, 5,
+    "FAST threshold used by the ORB detector in the offline frontend.");
+DEFINE_int32(
+    frontend_pyramid_levels, 4,
+    "Number of ORB image pyramid levels in the offline frontend.");
+DEFINE_double(
+    frontend_nms_radius, 4.0,
+    "Non-maximum suppression radius in pixels in the offline frontend.");
+DEFINE_int32(
+    frontend_max_features, 1000,
+    "Maximum number of detected features retained per camera frame.");
 
 namespace {
 
@@ -43,6 +55,13 @@ struct TriangulationStats {
   size_t positive_depth_observations = 0u;
   double median_reprojection_error_px = 0.0;
   double p95_reprojection_error_px = 0.0;
+};
+
+struct PairFrontendStats {
+  size_t previous_index = 0u;
+  size_t current_index = 0u;
+  size_t inlier_matches = 0u;
+  size_t outlier_matches = 0u;
 };
 
 TriangulationStats computeTriangulationStats(const vi_map::VIMap& map) {
@@ -118,7 +137,9 @@ void writeReport(
     const size_t iterations, const double pose_rms_delta_m,
     const double pose_max_delta_m, const double velocity_rms_delta_m_s,
     const double accel_bias_rms_delta, const double gyro_bias_rms_delta,
-    const TriangulationStats& triangulation_stats) {
+    const TriangulationStats& triangulation_stats,
+    const std::vector<size_t>& frame_keypoint_counts,
+    const std::vector<PairFrontendStats>& pair_stats) {
   std::ofstream stream(path);
   CHECK(stream.good()) << "Unable to write report: " << path;
   stream << "{\n"
@@ -132,6 +153,30 @@ void writeReport(
          << "  \"inlier_matches\": " << inlier_matches << ",\n"
          << "  \"outlier_matches\": " << outlier_matches << ",\n"
          << "  \"landmarks\": " << landmarks << ",\n"
+         << "  \"frontend_settings\": {\n"
+         << "    \"fast_threshold\": " << FLAGS_frontend_fast_threshold
+         << ",\n"
+         << "    \"pyramid_levels\": " << FLAGS_frontend_pyramid_levels
+         << ",\n"
+         << "    \"nms_radius_px\": " << FLAGS_frontend_nms_radius
+         << ",\n"
+         << "    \"max_features\": " << FLAGS_frontend_max_features << "\n"
+         << "  },\n"
+         << "  \"frame_keypoint_counts\": [";
+  for (size_t index = 0u; index < frame_keypoint_counts.size(); ++index) {
+    stream << (index == 0u ? "" : ", ") << frame_keypoint_counts[index];
+  }
+  stream << "],\n"
+         << "  \"pair_match_counts\": [\n";
+  for (size_t index = 0u; index < pair_stats.size(); ++index) {
+    const PairFrontendStats& pair = pair_stats[index];
+    stream << "    {\"previous_index\": " << pair.previous_index
+           << ", \"current_index\": " << pair.current_index
+           << ", \"inliers\": " << pair.inlier_matches
+           << ", \"outliers\": " << pair.outlier_matches << "}"
+           << (index + 1u == pair_stats.size() ? "\n" : ",\n");
+  }
+  stream << "  ],\n"
          << "  \"triangulation\": {\n"
          << "    \"good_landmarks\": " << triangulation_stats.good_landmarks
          << ",\n"
@@ -185,6 +230,10 @@ int main(int argc, char** argv) {
   CHECK(!FLAGS_map.empty()) << "--map is required";
   CHECK(!FLAGS_report.empty()) << "--report is required";
   CHECK_GT(FLAGS_ba_iterations, 0);
+  CHECK_GE(FLAGS_frontend_fast_threshold, 0);
+  CHECK_GT(FLAGS_frontend_pyramid_levels, 0);
+  CHECK_GT(FLAGS_frontend_nms_radius, 0.0);
+  CHECK_GT(FLAGS_frontend_max_features, 0);
 
   vi_map::VIMap map;
   CHECK(vi_map::serialization::loadMapFromFolder(FLAGS_map, &map));
@@ -216,12 +265,22 @@ int main(int argc, char** argv) {
 
   size_t inlier_match_count = 0u;
   size_t outlier_match_count = 0u;
+  std::vector<size_t> frame_keypoint_counts;
+  std::vector<PairFrontendStats> pair_stats;
   if (FLAGS_run_frontend) {
     aslam::NCamera::ConstPtr ncamera =
         map.getVertex(vertex_ids.front()).getNCameras();
     feature_tracking::FeatureTrackingExtractorSettings extractor_settings;
     feature_tracking::FeatureTrackingDetectorSettings detector_settings;
     feature_tracking::FeatureTrackingOutlierSettings outlier_settings;
+    detector_settings.orb_detector_fast_threshold =
+        FLAGS_frontend_fast_threshold;
+    detector_settings.orb_detector_pyramid_levels =
+        FLAGS_frontend_pyramid_levels;
+    detector_settings.detector_nonmaxsuppression_radius =
+        FLAGS_frontend_nms_radius;
+    detector_settings.max_feature_count =
+        static_cast<size_t>(FLAGS_frontend_max_features);
     feature_tracking::VOFeatureTrackingPipeline tracker(
         ncamera, extractor_settings, detector_settings, outlier_settings);
 
@@ -230,6 +289,10 @@ int main(int argc, char** argv) {
     tracker.initializeFirstNFrame(
         previous_vertex->getVisualNFrameShared().get());
     previous_vertex->expandVisualObservationContainersIfNecessary();
+    frame_keypoint_counts.reserve(vertex_ids.size());
+    pair_stats.reserve(vertex_ids.size() - 1u);
+    frame_keypoint_counts.emplace_back(
+        previous_vertex->getVisualFrame(0u).getNumKeypointMeasurements());
     for (size_t index = 1u; index < vertex_ids.size(); ++index) {
       vi_map::Vertex* current_vertex = &map.getVertex(vertex_ids[index]);
       loadRawImage(&map, current_vertex);
@@ -247,6 +310,11 @@ int main(int argc, char** argv) {
       inlier_match_count += inlier_matches.front().size();
       outlier_match_count += outlier_matches.front().size();
       current_vertex->expandVisualObservationContainersIfNecessary();
+      frame_keypoint_counts.emplace_back(
+          current_vertex->getVisualFrame(0u).getNumKeypointMeasurements());
+      pair_stats.push_back(PairFrontendStats{
+          index - 1u, index, inlier_matches.front().size(),
+          outlier_matches.front().size()});
       previous_vertex->getVisualNFrameShared()->releaseRawImagesOfAllFrames();
       previous_vertex = current_vertex;
     }
@@ -254,6 +322,15 @@ int main(int argc, char** argv) {
   }
 
   const size_t keypoint_count = countKeypoints(vertex_ids, map);
+  if (!FLAGS_run_frontend) {
+    frame_keypoint_counts.reserve(vertex_ids.size());
+    for (const pose_graph::VertexId& vertex_id : vertex_ids) {
+      frame_keypoint_counts.emplace_back(
+          map.getVertex(vertex_id)
+              .getVisualFrame(0u)
+              .getNumKeypointMeasurements());
+    }
+  }
   if (FLAGS_run_frontend) {
     vi_map_helpers::VIMapManipulation manipulation(&map);
     const size_t landmark_count =
@@ -275,7 +352,7 @@ int main(int argc, char** argv) {
     writeReport(
         FLAGS_report, vertex_ids.size(), keypoint_count, inlier_match_count,
         outlier_match_count, map.numLandmarks(), 0.0, 0.0, 0u, 0.0, 0.0,
-        0.0, 0.0, 0.0, triangulation_stats);
+        0.0, 0.0, 0.0, triangulation_stats, frame_keypoint_counts, pair_stats);
     LOG(INFO) << "BRISK frontend and triangulation complete without BA: "
               << map.numLandmarks() << " landmarks, median reprojection error "
               << triangulation_stats.median_reprojection_error_px << " px";
@@ -355,7 +432,8 @@ int main(int argc, char** argv) {
       outlier_match_count, map.numLandmarks(), initial_summary.initial_cost,
       final_summary.final_cost, total_iterations, rms_pose_delta,
       max_pose_delta, rms_velocity_delta, rms_accel_bias_delta,
-      rms_gyro_bias_delta, triangulation_stats);
+      rms_gyro_bias_delta, triangulation_stats, frame_keypoint_counts,
+      pair_stats);
   LOG(INFO) << "BRISK frontend and "
             << (FLAGS_use_imu ? "visual-inertial" : "visual")
             << " BA complete: " << keypoint_count
