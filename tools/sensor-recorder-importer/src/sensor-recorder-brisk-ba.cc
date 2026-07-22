@@ -26,6 +26,7 @@ DEFINE_string(map, "", "VI-Map folder to process in place.");
 DEFINE_string(report, "", "Path to write the frontend and BA JSON report.");
 DEFINE_int32(ba_iterations, 30, "Maximum number of visual BA iterations.");
 DEFINE_bool(run_frontend, true, "Extract and match features before BA.");
+DEFINE_bool(run_ba, true, "Run bundle adjustment after triangulation.");
 DEFINE_bool(use_imu, false, "Add VIWLS IMU factors to the BA problem.");
 DEFINE_bool(
     optimize_extrinsics, false,
@@ -34,6 +35,60 @@ DEFINE_bool(optimize_biases, true, "Optimize accelerometer and gyro biases.");
 DEFINE_bool(optimize_velocity, true, "Optimize keyframe velocities.");
 
 namespace {
+
+struct TriangulationStats {
+  size_t good_landmarks = 0u;
+  size_t bad_landmarks = 0u;
+  size_t observations = 0u;
+  size_t positive_depth_observations = 0u;
+  double median_reprojection_error_px = 0.0;
+  double p95_reprojection_error_px = 0.0;
+};
+
+TriangulationStats computeTriangulationStats(const vi_map::VIMap& map) {
+  TriangulationStats stats;
+  std::vector<double> reprojection_errors;
+  vi_map::LandmarkIdList landmark_ids;
+  map.getAllLandmarkIds(&landmark_ids);
+  for (const vi_map::LandmarkId& landmark_id : landmark_ids) {
+    const vi_map::Landmark& landmark = map.getLandmark(landmark_id);
+    if (landmark.getQuality() == vi_map::Landmark::Quality::kGood) {
+      ++stats.good_landmarks;
+    } else {
+      ++stats.bad_landmarks;
+    }
+    for (const vi_map::KeypointIdentifier& observation :
+         landmark.getObservations()) {
+      const vi_map::Vertex& vertex =
+          map.getVertex(observation.frame_id.vertex_id);
+      const size_t frame_index = observation.frame_id.frame_index;
+      const Eigen::Vector3d p_C =
+          map.getLandmark_p_C_fi(landmark_id, vertex, frame_index);
+      ++stats.observations;
+      if (p_C.z() <= 0.0) {
+        continue;
+      }
+      ++stats.positive_depth_observations;
+      Eigen::Vector2d projected;
+      vertex.getCamera(frame_index)->project3(p_C, &projected);
+      const Eigen::Vector2d measured =
+          vertex.getVisualFrame(frame_index)
+              .getKeypointMeasurements()
+              .col(observation.keypoint_index);
+      reprojection_errors.emplace_back((projected - measured).norm());
+    }
+  }
+  if (!reprojection_errors.empty()) {
+    std::sort(reprojection_errors.begin(), reprojection_errors.end());
+    stats.median_reprojection_error_px =
+        reprojection_errors[reprojection_errors.size() / 2u];
+    const size_t p95_index = std::min(
+        reprojection_errors.size() - 1u,
+        static_cast<size_t>(0.95 * reprojection_errors.size()));
+    stats.p95_reprojection_error_px = reprojection_errors[p95_index];
+  }
+  return stats;
+}
 
 void loadRawImage(vi_map::VIMap* map, vi_map::Vertex* vertex) {
   CHECK_NOTNULL(map);
@@ -62,7 +117,8 @@ void writeReport(
     const size_t landmarks, const double initial_cost, const double final_cost,
     const size_t iterations, const double pose_rms_delta_m,
     const double pose_max_delta_m, const double velocity_rms_delta_m_s,
-    const double accel_bias_rms_delta, const double gyro_bias_rms_delta) {
+    const double accel_bias_rms_delta, const double gyro_bias_rms_delta,
+    const TriangulationStats& triangulation_stats) {
   std::ofstream stream(path);
   CHECK(stream.good()) << "Unable to write report: " << path;
   stream << "{\n"
@@ -76,10 +132,34 @@ void writeReport(
          << "  \"inlier_matches\": " << inlier_matches << ",\n"
          << "  \"outlier_matches\": " << outlier_matches << ",\n"
          << "  \"landmarks\": " << landmarks << ",\n"
+         << "  \"triangulation\": {\n"
+         << "    \"good_landmarks\": " << triangulation_stats.good_landmarks
+         << ",\n"
+         << "    \"bad_landmarks\": " << triangulation_stats.bad_landmarks
+         << ",\n"
+         << "    \"observations\": " << triangulation_stats.observations
+         << ",\n"
+         << "    \"positive_depth_observations\": "
+         << triangulation_stats.positive_depth_observations << ",\n"
+         << "    \"positive_depth_ratio\": "
+         << (triangulation_stats.observations > 0u
+                 ? static_cast<double>(
+                       triangulation_stats.positive_depth_observations) /
+                       triangulation_stats.observations
+                 : 0.0)
+         << ",\n"
+         << "    \"median_reprojection_error_px\": "
+         << triangulation_stats.median_reprojection_error_px << ",\n"
+         << "    \"p95_reprojection_error_px\": "
+         << triangulation_stats.p95_reprojection_error_px << "\n"
+         << "  },\n"
          << "  \"ba\": {\n"
          << "    \"type\": \""
-         << (FLAGS_use_imu ? "visual_inertial" : "visual") << "\",\n"
-         << "    \"imu_factors\": " << (FLAGS_use_imu ? "true" : "false")
+         << (!FLAGS_run_ba ? "disabled"
+                           : (FLAGS_use_imu ? "visual_inertial" : "visual"))
+         << "\",\n"
+         << "    \"imu_factors\": "
+         << (FLAGS_run_ba && FLAGS_use_imu ? "true" : "false")
          << ",\n"
          << "    \"optimize_extrinsics\": "
          << (FLAGS_optimize_extrinsics ? "true" : "false") << ",\n"
@@ -184,6 +264,23 @@ int main(int argc, char** argv) {
   }
   CHECK_GT(map.numLandmarks(), 0u);
   CHECK(vi_map::checkMapConsistency(map));
+  const TriangulationStats triangulation_stats =
+      computeTriangulationStats(map);
+
+  if (!FLAGS_run_ba) {
+    backend::SaveConfig save_config;
+    save_config.overwrite_existing_files = true;
+    CHECK(vi_map::serialization::saveMapToFolder(
+        FLAGS_map, save_config, &map));
+    writeReport(
+        FLAGS_report, vertex_ids.size(), keypoint_count, inlier_match_count,
+        outlier_match_count, map.numLandmarks(), 0.0, 0.0, 0u, 0.0, 0.0,
+        0.0, 0.0, 0.0, triangulation_stats);
+    LOG(INFO) << "BRISK frontend and triangulation complete without BA: "
+              << map.numLandmarks() << " landmarks, median reprojection error "
+              << triangulation_stats.median_reprojection_error_px << " px";
+    return 0;
+  }
 
   map_optimization::ViProblemOptions options =
       map_optimization::ViProblemOptions::initFromGFlags();
@@ -258,7 +355,7 @@ int main(int argc, char** argv) {
       outlier_match_count, map.numLandmarks(), initial_summary.initial_cost,
       final_summary.final_cost, total_iterations, rms_pose_delta,
       max_pose_delta, rms_velocity_delta, rms_accel_bias_delta,
-      rms_gyro_bias_delta);
+      rms_gyro_bias_delta, triangulation_stats);
   LOG(INFO) << "BRISK frontend and "
             << (FLAGS_use_imu ? "visual-inertial" : "visual")
             << " BA complete: " << keypoint_count

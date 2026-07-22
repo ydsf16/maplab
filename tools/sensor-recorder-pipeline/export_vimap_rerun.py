@@ -127,6 +127,7 @@ def main() -> None:
         ]
     )
     landmarks = np.empty((0, 3), dtype=np.float64)
+    bad_landmarks = np.empty((0, 3), dtype=np.float64)
     keypoints_by_vertex: dict[int, tuple[np.ndarray, np.ndarray]] = {}
     if args.optimized_dir is not None:
         optimized_rows = load_csv(args.optimized_dir / "vertices.csv")
@@ -148,8 +149,13 @@ def main() -> None:
             ]
         )
         landmark_rows = load_csv(args.optimized_dir / "landmarks.csv")
+        good_rows = [row for row in landmark_rows if row.get("quality") == "2"]
+        bad_rows = [row for row in landmark_rows if row.get("quality") != "2"]
         landmarks = np.asarray(
-            [[float(row[f"{axis}_m"]) for axis in "xyz"] for row in landmark_rows]
+            [[float(row[f"{axis}_m"]) for axis in "xyz"] for row in good_rows]
+        )
+        bad_landmarks = np.asarray(
+            [[float(row[f"{axis}_m"]) for axis in "xyz"] for row in bad_rows]
         )
         grouped: dict[int, list[tuple[float, float, bool]]] = {}
         for row in load_csv(args.optimized_dir / "keypoints.csv"):
@@ -177,7 +183,7 @@ def main() -> None:
         write_rerun(
             args, rows, report, config, initial_positions, positions, velocities,
             rotations, initial_edge_segments, edge_segments, landmarks,
-            keypoints_by_vertex, r_imu_camera, t_imu_camera, images,
+            bad_landmarks, keypoints_by_vertex, r_imu_camera, t_imu_camera, images,
         )
     else:
         with tempfile.TemporaryDirectory(prefix="vimap-rerun-images-") as temp_dir:
@@ -185,7 +191,7 @@ def main() -> None:
             write_rerun(
                 args, rows, report, config, initial_positions, positions, velocities,
                 rotations, initial_edge_segments, edge_segments, landmarks,
-                keypoints_by_vertex, r_imu_camera, t_imu_camera, images,
+                bad_landmarks, keypoints_by_vertex, r_imu_camera, t_imu_camera, images,
             )
 
     print(
@@ -206,6 +212,7 @@ def write_rerun(
     initial_edge_segments: np.ndarray,
     edge_segments: np.ndarray,
     landmarks: np.ndarray,
+    bad_landmarks: np.ndarray,
     keypoints_by_vertex: dict[int, tuple[np.ndarray, np.ndarray]],
     r_imu_camera: np.ndarray,
     t_imu_camera: np.ndarray,
@@ -266,6 +273,16 @@ def write_rerun(
             ),
             static=True,
         )
+    if len(bad_landmarks):
+        rr.log(
+            "world/debug/bad_landmarks",
+            rr.Points3D(
+                bad_landmarks,
+                colors=[255, 70, 70],
+                radii=rr.Radius.ui_points(1.0),
+            ),
+            static=True,
+        )
     rr.log(
         "world/imu/camera",
         rr.Transform3D(
@@ -284,6 +301,7 @@ def write_rerun(
                     f"vertices: {len(rows)}",
                     f"VIWLS edges: {len(rows) - 1}",
                     f"landmarks: {len(landmarks)}",
+                    f"bad landmarks: {len(bad_landmarks)}",
                     f"raw images: {len(images)}",
                     "pose: T_M_I, meters",
                     "camera: OpenCV RDF",
