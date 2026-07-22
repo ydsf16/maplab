@@ -127,6 +127,7 @@ class PipelineIntegrationTest(unittest.TestCase):
             full_arguments = [
                 "single", "--data", str(recording), "--output", str(output),
                 "--config", str(test_config), "--vimap-importer", str(fake_importer),
+                "--to", "create_vimap",
             ]
             self.assertEqual(pipeline.main(full_arguments), 0)
             self.assertEqual(pipeline.main(full_arguments), 0)

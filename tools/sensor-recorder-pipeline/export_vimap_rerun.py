@@ -1,0 +1,259 @@
+#!/usr/bin/env python3
+
+import argparse
+import csv
+import json
+import shutil
+import subprocess
+import tempfile
+from pathlib import Path
+
+import numpy as np
+import rerun as rr
+
+
+def quaternion_matrix(w: float, x: float, y: float, z: float) -> np.ndarray:
+    quaternion = np.asarray([w, x, y, z], dtype=np.float64)
+    quaternion /= np.linalg.norm(quaternion)
+    w, x, y, z = quaternion
+    return np.asarray(
+        [
+            [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+            [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+            [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+        ],
+        dtype=np.float64,
+    )
+
+
+def load_keyframes(path: Path) -> list[dict[str, str]]:
+    with path.open("r", newline="", encoding="utf-8-sig") as stream:
+        rows = list(csv.DictReader(stream))
+    if len(rows) < 2:
+        raise ValueError(f"expected at least two keyframes in {path}")
+    return rows
+
+
+def parse_arguments() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Export an imported VI-Map to Rerun.")
+    parser.add_argument("--keyframes", required=True, type=Path)
+    parser.add_argument("--report", required=True, type=Path)
+    parser.add_argument("--config", required=True, type=Path)
+    image_source = parser.add_mutually_exclusive_group(required=True)
+    image_source.add_argument("--video", type=Path)
+    image_source.add_argument("--images-dir", type=Path)
+    parser.add_argument("--output", required=True, type=Path)
+    return parser.parse_args()
+
+
+def extract_keyframe_images(
+    video_path: Path, rows: list[dict[str, str]], output_dir: Path
+) -> list[Path]:
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        raise RuntimeError("ffmpeg is required")
+    frame_indices = [int(row["frame_index"]) for row in rows]
+    select_expression = "+".join(
+        f"eq(n\\,{frame_index})" for frame_index in frame_indices
+    )
+    result = subprocess.run(
+        [
+            ffmpeg,
+            "-v", "error",
+            "-i", str(video_path),
+            "-vf", f"select={select_expression}",
+            "-vsync", "0",
+            "-q:v", "2",
+            str(output_dir / "keyframe_%06d.jpg"),
+        ],
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"ffmpeg failed with exit code {result.returncode}")
+    images = sorted(output_dir.glob("keyframe_*.jpg"))
+    if len(images) != len(rows):
+        raise RuntimeError(
+            f"expected {len(rows)} keyframe images, extracted {len(images)}"
+        )
+    return images
+
+
+def load_keyframe_images(args: argparse.Namespace, rows: list[dict[str, str]]) -> list[Path]:
+    if args.images_dir is not None:
+        images = sorted(args.images_dir.glob("keyframe_*.jpg"))
+        if len(images) != len(rows):
+            raise RuntimeError(
+                f"expected {len(rows)} images in {args.images_dir}, found {len(images)}"
+            )
+        return images
+    raise AssertionError("video images must be extracted in a temporary directory")
+
+
+def main() -> None:
+    args = parse_arguments()
+    rows = load_keyframes(args.keyframes)
+    report = json.loads(args.report.read_text(encoding="utf-8"))
+    config = json.loads(args.config.read_text(encoding="utf-8"))
+    verified = report["verified_counts"]
+    if len(rows) != int(verified["vertices"]):
+        raise ValueError("keyframe count does not match the reloaded VI-Map report")
+
+    positions = np.asarray(
+        [[float(row[f"p_M_I_{axis}_m"]) for axis in "xyz"] for row in rows]
+    )
+    velocities = np.asarray(
+        [[float(row[f"v_M_I_{axis}_m_s"]) for axis in "xyz"] for row in rows]
+    )
+    rotations = np.asarray(
+        [
+            quaternion_matrix(
+                float(row["q_M_I_w"]),
+                float(row["q_M_I_x"]),
+                float(row["q_M_I_y"]),
+                float(row["q_M_I_z"]),
+            )
+            for row in rows
+        ]
+    )
+    edge_segments = np.stack([positions[:-1], positions[1:]], axis=1)
+
+    r_camera_imu = np.asarray(config["extrinsics"]["rotation"], dtype=np.float64)
+    t_camera_imu = np.asarray(config["extrinsics"]["translation_m"], dtype=np.float64)
+    r_imu_camera = r_camera_imu.T
+    t_imu_camera = -r_imu_camera @ t_camera_imu
+
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    if args.images_dir is not None:
+        images = load_keyframe_images(args, rows)
+        write_rerun(args, rows, report, config, positions, velocities, rotations,
+                    edge_segments, r_imu_camera, t_imu_camera, images)
+    else:
+        with tempfile.TemporaryDirectory(prefix="vimap-rerun-images-") as temp_dir:
+            images = extract_keyframe_images(args.video, rows, Path(temp_dir))
+            write_rerun(args, rows, report, config, positions, velocities, rotations,
+                        edge_segments, r_imu_camera, t_imu_camera, images)
+
+    print(
+        f"wrote {args.output} with {len(rows)} vertices, "
+        f"{len(edge_segments)} VIWLS edges and {len(rows)} images"
+    )
+
+
+def write_rerun(
+    args: argparse.Namespace,
+    rows: list[dict[str, str]],
+    report: dict,
+    config: dict,
+    positions: np.ndarray,
+    velocities: np.ndarray,
+    rotations: np.ndarray,
+    edge_segments: np.ndarray,
+    r_imu_camera: np.ndarray,
+    t_imu_camera: np.ndarray,
+    images: list[Path],
+) -> None:
+    verified = report["verified_counts"]
+    rr.init("sensor_recorder_vimap", spawn=False)
+    rr.save(str(args.output))
+    rr.log("world", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
+    rr.log(
+        "world/pose_graph/vertices",
+        rr.Points3D(
+            positions,
+            colors=[70, 170, 255],
+            radii=rr.Radius.ui_points(4.0),
+        ),
+        static=True,
+    )
+    rr.log(
+        "world/pose_graph/viwls_edges",
+        rr.LineStrips3D(edge_segments, colors=[120, 210, 255], radii=0.002),
+        static=True,
+    )
+    rr.log(
+        "world/pose_graph/velocity",
+        rr.Arrows3D(
+            origins=positions,
+            vectors=velocities * 0.15,
+            colors=[255, 185, 55],
+            radii=rr.Radius.ui_points(1.0),
+        ),
+        static=True,
+    )
+    rr.log(
+        "world/pose_graph/endpoints",
+        rr.Points3D(
+            [positions[0], positions[-1]],
+            colors=[[60, 230, 100], [255, 70, 70]],
+            radii=rr.Radius.ui_points(7.0),
+            labels=["start", "end"],
+            show_labels=True,
+        ),
+        static=True,
+    )
+    rr.log(
+        "world/imu/camera",
+        rr.Transform3D(
+            translation=t_imu_camera,
+            mat3x3=r_imu_camera,
+            relation=rr.TransformRelation.ParentFromChild,
+        ),
+        static=True,
+    )
+    rr.log(
+        "metadata",
+        rr.TextDocument(
+            "\n".join(
+                [
+                    f"VI-Map: {report['output_map']}",
+                    f"vertices: {verified['vertices']}",
+                    f"VIWLS edges: {verified['viwls_edges']}",
+                    f"raw images: {len(images)}",
+                    "pose: T_M_I, meters",
+                    "camera: OpenCV RDF",
+                    "extrinsic: initial T_C_I, translation zero",
+                ]
+            )
+        ),
+        static=True,
+    )
+
+    for index, (row, position, rotation, image) in enumerate(
+        zip(rows, positions, rotations, images)
+    ):
+        rr.set_time("keyframe", sequence=index)
+        rr.set_time("source_frame", sequence=int(row["frame_index"]))
+        rr.set_time("sensor_time", duration=float(row["sensor_sec"]))
+        rr.log(
+            "world/imu",
+            rr.Transform3D(
+                translation=position,
+                mat3x3=rotation,
+                relation=rr.TransformRelation.ParentFromChild,
+            ),
+        )
+        image_from_camera = np.asarray(
+            [
+                [float(row["fx_px"]), 0.0, float(row["cx_px"])],
+                [0.0, float(row["fy_px"]), float(row["cy_px"])],
+                [0.0, 0.0, 1.0],
+            ]
+        )
+        rr.log(
+            "world/imu/camera",
+            rr.Pinhole(
+                image_from_camera=image_from_camera,
+                resolution=[int(row["width_px"]), int(row["height_px"])],
+                camera_xyz=rr.ViewCoordinates.RDF,
+                image_plane_distance=0.12,
+                color=[245, 245, 245],
+                line_width=0.0015,
+            ),
+        )
+        rr.log("world/imu/camera/image", rr.EncodedImage(path=image))
+
+    rr.disconnect()
+
+
+if __name__ == "__main__":
+    main()
