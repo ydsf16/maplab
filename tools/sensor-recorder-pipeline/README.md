@@ -62,6 +62,12 @@ The frontend report contains every frame's detected keypoint count and every
 adjacent frame pair's RANSAC inlier/outlier counts. When this report is passed
 to `export_vimap_rerun.py`, the same values are available as Rerun scalar
 timelines and all detected keypoints are overlaid on the keyframe images.
+Rejected landmarks are omitted from the default 3D view; pass
+`--include-bad-landmarks` for a dedicated debugging export.
+
+`configs/iphone_arkit_dense.json` imports every IMU-covered camera frame as a
+VI-Map vertex. Use it when validating the built-in adjacent-frame tracker; the
+default configuration keeps every third frame for the normal keyframe map.
 
 `sensor_recorder_vimap_export` writes optimized poses, landmarks and 2D
 keypoints for `export_vimap_rerun.py`. The Rerun recording then contains both
