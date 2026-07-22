@@ -22,6 +22,9 @@ The pipeline provides four stages:
 `frame_index` and stores one grayscale `kRawImage` resource on every VI-Map
 vertex. Each VIWLS edge contains the original IMU samples inside its time
 interval and linearly interpolated measurements at both vertex timestamps.
+The iPhone accelerometer samples are negated during normalization because
+maplab expects specific force, while Sensor Recorder reports the gravity
+direction at rest.
 
 The initial vertex velocity is derived from the ARKit position trajectory.
 Gyroscope and accelerometer biases are initialized to zero and are intended to
@@ -40,6 +43,21 @@ Build the native target in a configured maplab catkin workspace with:
 ```bash
 catkin build sensor_recorder_importer
 ```
+
+Run visual-inertial BA on a map that already contains feature tracks with:
+
+```bash
+sensor_recorder_brisk_ba \
+  --map=/path/to/vi_map \
+  --report=/path/to/report.json \
+  --run_frontend=false \
+  --use_imu=true \
+  --optimize_extrinsics=false
+```
+
+`sensor_recorder_vimap_export` writes optimized poses, landmarks and 2D
+keypoints for `export_vimap_rerun.py`. The Rerun recording then contains both
+the initial trajectory and the optimized VI-Map trajectory.
 
 The default configuration is `configs/iphone_arkit.json`. It records all frame
 conventions explicitly. Initial camera-to-IMU translation is zero; the initial

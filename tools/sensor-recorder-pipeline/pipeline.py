@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Sequence, Tuple
 
 
-PIPELINE_VERSION = "0.3.0"
+PIPELINE_VERSION = "0.4.0"
 STAGES = ("validate", "normalize", "create_vimap", "export_rerun")
 REQUIRED_FILES = (
     "meta.json",
@@ -321,7 +321,12 @@ def pair_imu(
     gyro_path: Path,
     t0: float,
     tolerance: float,
+    accelerometer_to_specific_force_sign: float,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    if accelerometer_to_specific_force_sign not in (-1.0, 1.0):
+        raise PipelineError(
+            "imu.accelerometer_to_specific_force_sign must be -1 or 1"
+        )
     accel_times = [as_float(row, "sensor_sec", accel_path) for row in accel_rows]
     paired: List[Dict[str, Any]] = []
     accel_index = 0
@@ -345,9 +350,9 @@ def pair_imu(
                 "sensor_sec": f"{gyro_time:.9f}",
                 "accel_sensor_sec": f"{accel_times[accel_index]:.9f}",
                 "gyro_sensor_sec": f"{gyro_time:.9f}",
-                "ax_m_s2": f"{as_float(accel_row, 'ax_m_s2', accel_path):.12g}",
-                "ay_m_s2": f"{as_float(accel_row, 'ay_m_s2', accel_path):.12g}",
-                "az_m_s2": f"{as_float(accel_row, 'az_m_s2', accel_path):.12g}",
+                "ax_m_s2": f"{accelerometer_to_specific_force_sign * as_float(accel_row, 'ax_m_s2', accel_path):.12g}",  # noqa: E501
+                "ay_m_s2": f"{accelerometer_to_specific_force_sign * as_float(accel_row, 'ay_m_s2', accel_path):.12g}",  # noqa: E501
+                "az_m_s2": f"{accelerometer_to_specific_force_sign * as_float(accel_row, 'az_m_s2', accel_path):.12g}",  # noqa: E501
                 "gx_rad_s": f"{as_float(gyro_row, 'gx_rad_s', gyro_path):.12g}",
                 "gy_rad_s": f"{as_float(gyro_row, 'gy_rad_s', gyro_path):.12g}",
                 "gz_rad_s": f"{as_float(gyro_row, 'gz_rad_s', gyro_path):.12g}",
@@ -470,6 +475,7 @@ def normalize_recording(context: Context) -> Dict[str, Any]:
         gyro_path,
         t0,
         float(config["imu"]["pairing_tolerance_sec"]),
+        float(config["imu"]["accelerometer_to_specific_force_sign"]),
     )
     write_csv(output_dir / "imu.csv", list(paired_imu[0].keys()), paired_imu)
 
