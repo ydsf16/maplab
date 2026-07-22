@@ -43,7 +43,7 @@ int main(int argc, char** argv) {
               "v_x_m_s,v_y_m_s,v_z_m_s,accel_bias_x,accel_bias_y,"
               "accel_bias_z,gyro_bias_x,gyro_bias_y,gyro_bias_z\n";
   keypoints << "vertex_index,u_px,v_px,has_landmark\n";
-  landmarks << "x_m,y_m,z_m,observation_count\n";
+  landmarks << "x_m,y_m,z_m,observation_count,quality\n";
 
   size_t keypoint_count = 0u;
   size_t observation_count = 0u;
@@ -85,7 +85,9 @@ int main(int argc, char** argv) {
   for (const vi_map::LandmarkId& landmark_id : landmark_ids) {
     const Eigen::Vector3d p = map.getLandmark_G_p_fi(landmark_id);
     landmarks << p.x() << ',' << p.y() << ',' << p.z() << ','
-              << map.getLandmark(landmark_id).numberOfObservations() << '\n';
+              << map.getLandmark(landmark_id).numberOfObservations() << ','
+              << static_cast<int>(map.getLandmark(landmark_id).getQuality())
+              << '\n';
   }
   LOG(INFO) << "Exported " << vertex_ids.size() << " vertices, "
             << landmark_ids.size() << " landmarks, " << keypoint_count
