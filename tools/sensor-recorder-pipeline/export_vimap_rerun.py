@@ -129,6 +129,11 @@ def main() -> None:
     landmarks = np.empty((0, 3), dtype=np.float64)
     bad_landmarks = np.empty((0, 3), dtype=np.float64)
     keypoints_by_vertex: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+    frame_keypoint_counts = report.get("frame_keypoint_counts", [])
+    pair_match_counts = {
+        int(item["current_index"]): item
+        for item in report.get("pair_match_counts", [])
+    }
     if args.optimized_dir is not None:
         optimized_rows = load_csv(args.optimized_dir / "vertices.csv")
         if len(optimized_rows) != len(rows):
@@ -183,7 +188,8 @@ def main() -> None:
         write_rerun(
             args, rows, report, config, initial_positions, positions, velocities,
             rotations, initial_edge_segments, edge_segments, landmarks,
-            bad_landmarks, keypoints_by_vertex, r_imu_camera, t_imu_camera, images,
+            bad_landmarks, keypoints_by_vertex, frame_keypoint_counts,
+            pair_match_counts, r_imu_camera, t_imu_camera, images,
         )
     else:
         with tempfile.TemporaryDirectory(prefix="vimap-rerun-images-") as temp_dir:
@@ -191,7 +197,8 @@ def main() -> None:
             write_rerun(
                 args, rows, report, config, initial_positions, positions, velocities,
                 rotations, initial_edge_segments, edge_segments, landmarks,
-                bad_landmarks, keypoints_by_vertex, r_imu_camera, t_imu_camera, images,
+                bad_landmarks, keypoints_by_vertex, frame_keypoint_counts,
+                pair_match_counts, r_imu_camera, t_imu_camera, images,
             )
 
     print(
@@ -214,6 +221,8 @@ def write_rerun(
     landmarks: np.ndarray,
     bad_landmarks: np.ndarray,
     keypoints_by_vertex: dict[int, tuple[np.ndarray, np.ndarray]],
+    frame_keypoint_counts: list[int],
+    pair_match_counts: dict[int, dict],
     r_imu_camera: np.ndarray,
     t_imu_camera: np.ndarray,
     images: list[Path],
@@ -303,6 +312,7 @@ def write_rerun(
                     f"landmarks: {len(landmarks)}",
                     f"bad landmarks: {len(bad_landmarks)}",
                     f"raw images: {len(images)}",
+                    f"detected keypoints: {sum(frame_keypoint_counts)}",
                     "pose: T_M_I, meters",
                     "camera: OpenCV RDF",
                     "extrinsic: initial T_C_I, translation zero",
@@ -345,6 +355,15 @@ def write_rerun(
             ),
         )
         rr.log("world/imu/camera/image", rr.EncodedImage(path=image))
+        if index < len(frame_keypoint_counts):
+            rr.log(
+                "frontend/detected_keypoints",
+                rr.Scalars(float(frame_keypoint_counts[index])),
+            )
+        pair = pair_match_counts.get(index)
+        if pair is not None:
+            rr.log("frontend/pair_inliers", rr.Scalars(float(pair["inliers"])))
+            rr.log("frontend/pair_outliers", rr.Scalars(float(pair["outliers"])))
         if index in keypoints_by_vertex:
             matched, unmatched = keypoints_by_vertex[index]
             if len(unmatched):

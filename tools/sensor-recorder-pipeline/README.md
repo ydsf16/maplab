@@ -44,16 +44,24 @@ Build the native target in a configured maplab catkin workspace with:
 catkin build sensor_recorder_importer
 ```
 
-Run visual-inertial BA on a map that already contains feature tracks with:
+Run the tunable ORB/BRISK frontend and triangulation without BA with:
 
 ```bash
 sensor_recorder_brisk_ba \
   --map=/path/to/vi_map \
   --report=/path/to/report.json \
-  --run_frontend=false \
-  --use_imu=true \
-  --optimize_extrinsics=false
+  --run_frontend=true \
+  --run_ba=false \
+  --frontend_fast_threshold=5 \
+  --frontend_pyramid_levels=4 \
+  --frontend_nms_radius=4 \
+  --frontend_max_features=1000
 ```
+
+The frontend report contains every frame's detected keypoint count and every
+adjacent frame pair's RANSAC inlier/outlier counts. When this report is passed
+to `export_vimap_rerun.py`, the same values are available as Rerun scalar
+timelines and all detected keypoints are overlaid on the keyframe images.
 
 `sensor_recorder_vimap_export` writes optimized poses, landmarks and 2D
 keypoints for `export_vimap_rerun.py`. The Rerun recording then contains both
