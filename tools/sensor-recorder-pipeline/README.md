@@ -16,6 +16,15 @@ The first implementation provides three stages:
    maplab-oriented interchange format.
 3. `create_vimap`: invokes the native `sensor_recorder_to_vimap` executable.
 
+`create_vimap` requires `ffmpeg`. It decodes the video frames selected by
+`frame_index` and stores one grayscale `kRawImage` resource on every VI-Map
+vertex. Each VIWLS edge contains the original IMU samples inside its time
+interval and linearly interpolated measurements at both vertex timestamps.
+
+The initial vertex velocity is derived from the ARKit position trajectory.
+Gyroscope and accelerometer biases are initialized to zero and are intended to
+be estimated during visual-inertial optimization.
+
 Use `--to normalize` when the native maplab executable has not been built yet.
 Each completed stage has a fingerprint and is skipped on an unchanged rerun.
 

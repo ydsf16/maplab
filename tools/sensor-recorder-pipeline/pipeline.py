@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Sequence, Tuple
 
 
-PIPELINE_VERSION = "0.1.0"
+PIPELINE_VERSION = "0.2.0"
 STAGES = ("validate", "normalize", "create_vimap")
 REQUIRED_FILES = (
     "meta.json",
@@ -557,6 +557,56 @@ def normalize_recording(context: Context) -> Dict[str, Any]:
     return canonical_metadata
 
 
+def extract_keyframe_images(context: Context, normalized_dir: Path) -> int:
+    image_config = context.config.get("images", {})
+    if not image_config.get("enabled", True):
+        return 0
+
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        raise PipelineError("ffmpeg is required to extract VI-Map keyframe images")
+
+    keyframes_path = normalized_dir / "keyframes.csv"
+    keyframes = read_csv(keyframes_path, ("frame_index",))
+    frame_indices = [as_int(row, "frame_index", keyframes_path) for row in keyframes]
+    if len(set(frame_indices)) != len(frame_indices):
+        raise PipelineError("keyframe frame_index values must be unique")
+
+    images_dir = normalized_dir / "keyframe_images"
+    if images_dir.exists():
+        shutil.rmtree(images_dir)
+    images_dir.mkdir(parents=True)
+    output_pattern = images_dir / "keyframe_%06d.jpg"
+    select_expression = "+".join(
+        f"eq(n\\,{frame_index})" for frame_index in frame_indices
+    )
+    command = [
+        ffmpeg,
+        "-v", "error",
+        "-i", str(context.data_dir / "wide.mp4"),
+        "-vf", f"select={select_expression}",
+        "-vsync", "0",
+        "-q:v", str(image_config.get("jpeg_quality", 2)),
+        str(output_pattern),
+    ]
+    result = subprocess.run(command, check=False, text=True)
+    if result.returncode != 0:
+        raise PipelineError(
+            f"ffmpeg keyframe extraction failed with exit code {result.returncode}"
+        )
+
+    extracted = sorted(images_dir.glob("keyframe_*.jpg"))
+    if len(extracted) != len(keyframes):
+        raise PipelineError(
+            f"expected {len(keyframes)} keyframe images, extracted {len(extracted)}"
+        )
+    for row, image_path in zip(keyframes, extracted):
+        row["image_path"] = str(image_path.relative_to(normalized_dir))
+    fieldnames = list(keyframes[0].keys())
+    write_csv(keyframes_path, fieldnames, keyframes)
+    return len(extracted)
+
+
 def resolve_vimap_importer(context: Context) -> str | None:
     candidates = []
     if context.vimap_importer:
@@ -590,6 +640,8 @@ def create_vimap(context: Context) -> Dict[str, Any]:
     ):
         if not (normalized_dir / required).is_file():
             raise PipelineError(f"normalized input is missing: {normalized_dir / required}")
+
+    image_count = extract_keyframe_images(context, normalized_dir)
 
     stage_dir = context.output_dir / "maps" / "00_imported"
     vimap_dir = stage_dir / "vi_map"
@@ -638,6 +690,7 @@ def create_vimap(context: Context) -> Dict[str, Any]:
         "verified_counts": {
             "vertices": vertex_count,
             "viwls_edges": vertex_count - 1,
+            "raw_image_resources": image_count,
         },
     }
     atomic_write_json(stage_dir / "report.json", report)
