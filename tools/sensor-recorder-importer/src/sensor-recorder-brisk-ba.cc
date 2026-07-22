@@ -2,6 +2,7 @@
 #include <cmath>
 #include <cstdint>
 #include <fstream>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -16,6 +17,7 @@
 #include <map-optimization/vi-optimization-builder.h>
 #include <map-resources/resource-common.h>
 #include <sensors/imu.h>
+#include <sensors/external-features.h>
 #include <vi-map/check-map-consistency.h>
 #include <vi-map/vi-map-serialization.h>
 #include <vi-map/vi-map.h>
@@ -34,6 +36,9 @@ DECLARE_int32(gyro_lk_max_pyramid_levels);
 
 DEFINE_string(map, "", "VI-Map folder to process in place.");
 DEFINE_string(report, "", "Path to write the frontend and BA JSON report.");
+DEFINE_string(
+    tracks_csv, "",
+    "SuperPoint keypoints and LightGlue track IDs to import instead of BRISK.");
 DEFINE_int32(ba_iterations, 30, "Maximum number of visual BA iterations.");
 DEFINE_bool(run_frontend, true, "Extract and match features before BA.");
 DEFINE_bool(run_ba, true, "Run bundle adjustment after triangulation.");
@@ -73,6 +78,93 @@ struct PairFrontendStats {
   size_t inlier_matches = 0u;
   size_t outlier_matches = 0u;
 };
+
+struct ImportedKeypoint {
+  size_t keypoint_index = 0u;
+  double u_px = 0.0;
+  double v_px = 0.0;
+  double score = 0.0;
+  int track_id = -1;
+};
+
+std::vector<std::string> splitCsvLine(const std::string& line) {
+  std::vector<std::string> fields;
+  std::stringstream stream(line);
+  std::string field;
+  while (std::getline(stream, field, ',')) {
+    fields.emplace_back(field);
+  }
+  return fields;
+}
+
+void importSuperPointTracks(
+    const std::string& path, const pose_graph::VertexIdList& vertex_ids,
+    vi_map::VIMap* map) {
+  CHECK_NOTNULL(map);
+  std::ifstream stream(path);
+  CHECK(stream.good()) << "Unable to read tracks CSV: " << path;
+  std::string line;
+  CHECK(std::getline(stream, line));
+  if (!line.empty() && line.back() == '\r') {
+    line.pop_back();
+  }
+  CHECK_EQ(
+      line, "vertex_index,keypoint_index,u_px,v_px,score,track_id")
+      << "Unexpected tracks CSV header";
+  std::vector<std::vector<ImportedKeypoint>> per_vertex(vertex_ids.size());
+  size_t line_number = 1u;
+  while (std::getline(stream, line)) {
+    ++line_number;
+    if (line.empty()) {
+      continue;
+    }
+    const std::vector<std::string> fields = splitCsvLine(line);
+    CHECK_EQ(fields.size(), 6u) << "Malformed tracks CSV line " << line_number;
+    const size_t vertex_index = std::stoul(fields[0]);
+    CHECK_LT(vertex_index, per_vertex.size());
+    ImportedKeypoint keypoint;
+    keypoint.keypoint_index = std::stoul(fields[1]);
+    keypoint.u_px = std::stod(fields[2]);
+    keypoint.v_px = std::stod(fields[3]);
+    keypoint.score = std::stod(fields[4]);
+    keypoint.track_id = std::stoi(fields[5]);
+    CHECK_EQ(keypoint.keypoint_index, per_vertex[vertex_index].size())
+        << "Keypoints must be contiguous and ordered at line " << line_number;
+    per_vertex[vertex_index].emplace_back(keypoint);
+  }
+
+  for (size_t vertex_index = 0u; vertex_index < vertex_ids.size();
+       ++vertex_index) {
+    const std::vector<ImportedKeypoint>& input = per_vertex[vertex_index];
+    CHECK(!input.empty()) << "No SuperPoint features for vertex " << vertex_index;
+    const Eigen::Index count = static_cast<Eigen::Index>(input.size());
+    Eigen::Matrix2Xd measurements(2, count);
+    Eigen::VectorXd uncertainties = Eigen::VectorXd::Constant(count, 1.0);
+    Eigen::VectorXd scores(count);
+    Eigen::VectorXi track_ids(count);
+    for (Eigen::Index index = 0; index < count; ++index) {
+      measurements(0, index) = input[index].u_px;
+      measurements(1, index) = input[index].v_px;
+      scores(index) = input[index].score;
+      track_ids(index) = input[index].track_id;
+    }
+    // Tracks are produced by the external ONNX frontend. The descriptor byte
+    // is a placeholder needed by VisualFrame to carry the kSuperPoint type;
+    // matching continues to use the ONNX model, not these placeholder bytes.
+    aslam::VisualFrame::DescriptorsT descriptors(1, count);
+    descriptors.setZero();
+    vi_map::Vertex* vertex = &map->getVertex(vertex_ids[vertex_index]);
+    aslam::VisualFrame::Ptr frame = vertex->getVisualFrameShared(0u);
+    frame->setKeypointMeasurements(measurements);
+    frame->setKeypointMeasurementUncertainties(uncertainties);
+    frame->setKeypointScores(scores);
+    frame->setTrackIds(track_ids);
+    frame->setDescriptors(
+        descriptors, 0u, static_cast<int>(vi_map::FeatureType::kSuperPoint));
+    vertex->resetObservedLandmarkIdsToInvalid();
+    vertex->expandVisualObservationContainersIfNecessary();
+  }
+}
 
 TriangulationStats computeTriangulationStats(const vi_map::VIMap& map) {
   TriangulationStats stats;
@@ -155,8 +247,10 @@ void writeReport(
   stream << "{\n"
          << "  \"status\": \"created_and_verified\",\n"
          << "  \"frontend\": \""
-         << (FLAGS_run_frontend ? "maplab_orb_brisk_gyro_tracker"
-                                : "existing_vimap_tracks")
+         << (FLAGS_run_frontend
+                 ? "maplab_orb_brisk_gyro_tracker"
+                 : (FLAGS_tracks_csv.empty() ? "existing_vimap_tracks"
+                                             : "superpoint_lightglue_onnx"))
          << "\",\n"
          << "  \"vertices\": " << vertices << ",\n"
          << "  \"keypoints\": " << keypoints << ",\n"
@@ -296,6 +390,11 @@ int main(int argc, char** argv) {
   size_t outlier_match_count = 0u;
   std::vector<size_t> frame_keypoint_counts;
   std::vector<PairFrontendStats> pair_stats;
+  CHECK(FLAGS_tracks_csv.empty() || !FLAGS_run_frontend)
+      << "--tracks_csv and --run_frontend=true are mutually exclusive";
+  if (!FLAGS_tracks_csv.empty()) {
+    importSuperPointTracks(FLAGS_tracks_csv, vertex_ids, &map);
+  }
   if (FLAGS_run_frontend) {
     aslam::NCamera::ConstPtr ncamera =
         map.getVertex(vertex_ids.front()).getNCameras();
@@ -360,7 +459,7 @@ int main(int argc, char** argv) {
               .getNumKeypointMeasurements());
     }
   }
-  if (FLAGS_run_frontend) {
+  if (FLAGS_run_frontend || !FLAGS_tracks_csv.empty()) {
     vi_map_helpers::VIMapManipulation manipulation(&map);
     const size_t landmark_count =
         manipulation.initializeLandmarksFromUnusedFeatureTracksOfMission(

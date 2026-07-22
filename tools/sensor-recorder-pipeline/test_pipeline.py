@@ -94,6 +94,8 @@ class PipelineIntegrationTest(unittest.TestCase):
             test_config = root / "config.json"
             config_value = json.loads(config.read_text(encoding="utf-8"))
             config_value["images"]["enabled"] = False
+            config_value["images"]["width_px"] = 320
+            config_value["images"]["height_px"] = 240
             test_config.write_text(json.dumps(config_value), encoding="utf-8")
             arguments = [
                 "single", "--data", str(recording), "--output", str(output),
@@ -111,6 +113,14 @@ class PipelineIntegrationTest(unittest.TestCase):
             self.assertEqual(metadata["counts"]["keyframes"], 3)
             self.assertEqual(metadata["counts"]["imu_pairs"], 11)
             self.assertTrue((output / "normalized" / "calibration.csv").is_file())
+            with (output / "normalized" / "keyframes.csv").open(
+                newline="", encoding="utf-8"
+            ) as stream:
+                first_keyframe = next(csv.DictReader(stream))
+            self.assertEqual(int(first_keyframe["width_px"]), 320)
+            self.assertEqual(int(first_keyframe["height_px"]), 240)
+            self.assertEqual(float(first_keyframe["fx_px"]), 250.0)
+            self.assertEqual(float(first_keyframe["cx_px"]), 160.0)
 
             fake_importer = root / "fake_importer.py"
             fake_importer.write_text(
