@@ -132,6 +132,8 @@ them as `kSuperPoint` observations, triangulates without BA, and automatically
 exports a verified Rerun recording. The current VI-Map stores a one-byte
 placeholder descriptor per keypoint because subsequent matching remains in the
 external ONNX frontend; keypoints, scores, and track IDs are stored normally.
+The default match-score threshold is 0.15 and the Essential Matrix RANSAC
+threshold is 1.0 pixel at 640x480.
 
 On AutoDL, the default wrapper runs the native importer inside the isolated
 Ubuntu 20.04/ROS Noetic runtime. Its paths can be overridden with
