@@ -96,7 +96,9 @@ default configuration keeps every third frame for the normal keyframe map.
 
 `sensor_recorder_vimap_export` writes optimized poses, landmarks and 2D
 keypoints for `export_vimap_rerun.py`. The Rerun recording then contains both
-the initial trajectory and the optimized VI-Map trajectory.
+the initial trajectory and the optimized VI-Map trajectory. When calibration
+is enabled, the report and Rerun export use the optimized intrinsics and
+camera-IMU transform rather than the initial configuration values.
 
 The default configuration is `configs/iphone_arkit.json`. It records all frame
 conventions explicitly. Initial camera-to-IMU translation is zero; the initial
@@ -124,6 +126,11 @@ bash process.sh single \
 
 bash process.sh superpoint-lightglue \
   --output /root/data/maplab_results/SR_2026-07-22_22-24-31
+
+# Optional Visual-only BA with 3 px iterative outlier rejection.
+bash process.sh superpoint-lightglue \
+  --output /root/data/maplab_results/SR_2026-07-22_22-24-31 \
+  --visual-ba
 ```
 
 The ONNX frontend matches keyframes at offsets 1, 2, and 3, filters matches
