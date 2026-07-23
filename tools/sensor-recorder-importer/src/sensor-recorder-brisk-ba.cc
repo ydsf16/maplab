@@ -48,6 +48,9 @@ DEFINE_bool(
     "Optimize camera-IMU rotation and translation during BA.");
 DEFINE_bool(optimize_biases, true, "Optimize accelerometer and gyro biases.");
 DEFINE_bool(optimize_velocity, true, "Optimize keyframe velocities.");
+DEFINE_bool(
+    prune_bad_landmarks, false,
+    "Remove weak or rejected landmarks before saving the output map.");
 DEFINE_int32(
     frontend_fast_threshold, 5,
     "FAST threshold used by the ORB detector in the offline frontend.");
@@ -257,6 +260,8 @@ void writeReport(
          << "  \"inlier_matches\": " << inlier_matches << ",\n"
          << "  \"outlier_matches\": " << outlier_matches << ",\n"
          << "  \"landmarks\": " << landmarks << ",\n"
+         << "  \"prune_bad_landmarks\": "
+         << (FLAGS_prune_bad_landmarks ? "true" : "false") << ",\n"
          << "  \"frontend_settings\": {\n"
          << "    \"fast_threshold\": " << FLAGS_frontend_fast_threshold
          << ",\n"
@@ -469,6 +474,10 @@ int main(int argc, char** argv) {
   }
   CHECK_GT(map.numLandmarks(), 0u);
   CHECK(vi_map::checkMapConsistency(map));
+  if (FLAGS_prune_bad_landmarks) {
+    vi_map_helpers::VIMapManipulation manipulation(&map);
+    manipulation.removeBadLandmarks();
+  }
   const TriangulationStats triangulation_stats =
       computeTriangulationStats(map);
 
@@ -549,6 +558,10 @@ int main(int argc, char** argv) {
   const double rms_gyro_bias_delta =
       std::sqrt(squared_gyro_bias_delta_sum / vertex_ids.size());
 
+  if (FLAGS_prune_bad_landmarks) {
+    vi_map_helpers::VIMapManipulation manipulation(&map);
+    manipulation.removeBadLandmarks();
+  }
   CHECK(vi_map::checkMapConsistency(map));
   const TriangulationStats post_ba_triangulation_stats =
       computeTriangulationStats(map);
