@@ -113,6 +113,13 @@ def main() -> None:
     if verified is not None and len(rows) != int(verified["vertices"]):
         raise ValueError("keyframe count does not match the reloaded VI-Map report")
 
+    calibration = report.get("calibration", {})
+    final_intrinsics = calibration.get("final_intrinsics")
+    if isinstance(final_intrinsics, list) and len(final_intrinsics) == 4:
+        for row in rows:
+            for name, value in zip(("fx_px", "fy_px", "cx_px", "cy_px"), final_intrinsics):
+                row[name] = str(value)
+
     initial_positions = np.asarray(
         [[float(row[f"p_M_I_{axis}_m"]) for axis in "xyz"] for row in rows]
     )
@@ -196,8 +203,17 @@ def main() -> None:
         [initial_positions[:-1], initial_positions[1:]], axis=1
     )
 
-    r_camera_imu = np.asarray(config["extrinsics"]["rotation"], dtype=np.float64)
-    t_camera_imu = np.asarray(config["extrinsics"]["translation_m"], dtype=np.float64)
+    final_q_C_I = calibration.get("final_q_C_I_wxyz")
+    final_t_C_I = calibration.get("final_t_C_I_m")
+    if (
+        isinstance(final_q_C_I, list) and len(final_q_C_I) == 4
+        and isinstance(final_t_C_I, list) and len(final_t_C_I) == 3
+    ):
+        r_camera_imu = quaternion_matrix(*map(float, final_q_C_I))
+        t_camera_imu = np.asarray(final_t_C_I, dtype=np.float64)
+    else:
+        r_camera_imu = np.asarray(config["extrinsics"]["rotation"], dtype=np.float64)
+        t_camera_imu = np.asarray(config["extrinsics"]["translation_m"], dtype=np.float64)
     r_imu_camera = r_camera_imu.T
     t_imu_camera = -r_imu_camera @ t_camera_imu
 

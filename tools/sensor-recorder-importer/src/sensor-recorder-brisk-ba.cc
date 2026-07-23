@@ -48,6 +48,7 @@ DEFINE_bool(
     "Optimize camera-IMU rotation and translation during BA.");
 DEFINE_bool(optimize_biases, true, "Optimize accelerometer and gyro biases.");
 DEFINE_bool(optimize_velocity, true, "Optimize keyframe velocities.");
+DEFINE_bool(optimize_intrinsics, false, "Optimize camera intrinsics during BA.");
 DEFINE_bool(
     prune_bad_landmarks, false,
     "Remove weak or rejected landmarks before saving the output map.");
@@ -89,6 +90,21 @@ struct ImportedKeypoint {
   double score = 0.0;
   int track_id = -1;
 };
+
+struct CalibrationSnapshot {
+  Eigen::VectorXd intrinsics;
+  aslam::Transformation T_C_I;
+};
+
+CalibrationSnapshot getCalibrationSnapshot(const vi_map::VIMap& map) {
+  vi_map::MissionIdList mission_ids;
+  map.getAllMissionIds(&mission_ids);
+  CHECK_EQ(mission_ids.size(), 1u);
+  const aslam::NCamera& ncamera = map.getMissionNCamera(mission_ids.front());
+  CHECK_EQ(ncamera.getNumCameras(), 1u);
+  return CalibrationSnapshot{
+      ncamera.getCamera(0u).getParameters(), ncamera.get_T_C_B(0u)};
+}
 
 std::vector<std::string> splitCsvLine(const std::string& line) {
   std::vector<std::string> fields;
@@ -242,6 +258,8 @@ void writeReport(
     const size_t iterations, const double pose_rms_delta_m,
     const double pose_max_delta_m, const double velocity_rms_delta_m_s,
     const double accel_bias_rms_delta, const double gyro_bias_rms_delta,
+    const CalibrationSnapshot& calibration_before,
+    const CalibrationSnapshot& calibration_after,
     const TriangulationStats& triangulation_stats,
     const std::vector<size_t>& frame_keypoint_counts,
     const std::vector<PairFrontendStats>& pair_stats) {
@@ -262,6 +280,43 @@ void writeReport(
          << "  \"landmarks\": " << landmarks << ",\n"
          << "  \"prune_bad_landmarks\": "
          << (FLAGS_prune_bad_landmarks ? "true" : "false") << ",\n"
+         << "  \"calibration\": {\n"
+         << "    \"intrinsics_optimized\": "
+         << (FLAGS_optimize_intrinsics ? "true" : "false") << ",\n"
+         << "    \"extrinsics_optimized\": "
+         << (FLAGS_optimize_extrinsics ? "true" : "false") << ",\n"
+         << "    \"initial_intrinsics\": [";
+  for (Eigen::Index index = 0; index < calibration_before.intrinsics.size();
+       ++index) {
+    stream << (index == 0 ? "" : ", ")
+           << calibration_before.intrinsics(index);
+  }
+  stream << "],\n"
+         << "    \"final_intrinsics\": [";
+  for (Eigen::Index index = 0; index < calibration_after.intrinsics.size();
+       ++index) {
+    stream << (index == 0 ? "" : ", ")
+           << calibration_after.intrinsics(index);
+  }
+  const Eigen::Vector3d t_C_I_before =
+      calibration_before.T_C_I.getPosition();
+  const Eigen::Vector3d t_C_I_after = calibration_after.T_C_I.getPosition();
+  const Eigen::Quaterniond q_C_I_before =
+      calibration_before.T_C_I.getRotation().toImplementation();
+  const Eigen::Quaterniond q_C_I_after =
+      calibration_after.T_C_I.getRotation().toImplementation();
+  stream << "],\n"
+         << "    \"initial_t_C_I_m\": [" << t_C_I_before.x() << ", "
+         << t_C_I_before.y() << ", " << t_C_I_before.z() << "],\n"
+         << "    \"final_t_C_I_m\": [" << t_C_I_after.x() << ", "
+         << t_C_I_after.y() << ", " << t_C_I_after.z() << "],\n"
+         << "    \"initial_q_C_I_wxyz\": [" << q_C_I_before.w() << ", "
+         << q_C_I_before.x() << ", " << q_C_I_before.y() << ", "
+         << q_C_I_before.z() << "],\n"
+         << "    \"final_q_C_I_wxyz\": [" << q_C_I_after.w() << ", "
+         << q_C_I_after.x() << ", " << q_C_I_after.y() << ", "
+         << q_C_I_after.z() << "]\n"
+         << "  },\n"
          << "  \"frontend_settings\": {\n"
          << "    \"fast_threshold\": " << FLAGS_frontend_fast_threshold
          << ",\n"
@@ -366,6 +421,7 @@ int main(int argc, char** argv) {
   vi_map::VIMap map;
   CHECK(vi_map::serialization::loadMapFromFolder(FLAGS_map, &map));
   CHECK(vi_map::checkMapConsistency(map));
+  const CalibrationSnapshot calibration_before = getCalibrationSnapshot(map);
 
   vi_map::MissionIdList mission_ids;
   map.getAllMissionIds(&mission_ids);
@@ -489,7 +545,8 @@ int main(int argc, char** argv) {
     writeReport(
         FLAGS_report, vertex_ids.size(), keypoint_count, inlier_match_count,
         outlier_match_count, map.numLandmarks(), 0.0, 0.0, 0u, 0.0, 0.0,
-        0.0, 0.0, 0.0, triangulation_stats, frame_keypoint_counts, pair_stats);
+        0.0, 0.0, 0.0, calibration_before, getCalibrationSnapshot(map),
+        triangulation_stats, frame_keypoint_counts, pair_stats);
     LOG(INFO) << "BRISK frontend and triangulation complete without BA: "
               << map.numLandmarks() << " landmarks, median reprojection error "
               << triangulation_stats.median_reprojection_error_px << " px";
@@ -507,7 +564,7 @@ int main(int argc, char** argv) {
     options.gravity_magnitude =
         map.getMissionImu(mission_id).getGravityMagnitudeMps2();
   }
-  options.fix_intrinsics = true;
+  options.fix_intrinsics = !FLAGS_optimize_intrinsics;
   options.fix_extrinsics_rotation = !FLAGS_optimize_extrinsics;
   options.fix_extrinsics_translation = !FLAGS_optimize_extrinsics;
   options.solver_options.max_num_iterations = FLAGS_ba_iterations;
@@ -575,8 +632,8 @@ int main(int argc, char** argv) {
       outlier_match_count, map.numLandmarks(), initial_summary.initial_cost,
       final_summary.final_cost, total_iterations, rms_pose_delta,
       max_pose_delta, rms_velocity_delta, rms_accel_bias_delta,
-      rms_gyro_bias_delta, post_ba_triangulation_stats, frame_keypoint_counts,
-      pair_stats);
+      rms_gyro_bias_delta, calibration_before, getCalibrationSnapshot(map),
+      post_ba_triangulation_stats, frame_keypoint_counts, pair_stats);
   LOG(INFO) << "BRISK frontend and "
             << (FLAGS_use_imu ? "visual-inertial" : "visual")
             << " BA complete: " << keypoint_count
