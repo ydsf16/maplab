@@ -10,6 +10,7 @@ from pathlib import Path
 
 import numpy as np
 import rerun as rr
+import yaml
 
 
 def quaternion_matrix(w: float, x: float, y: float, z: float) -> np.ndarray:
@@ -58,7 +59,43 @@ def parse_arguments() -> argparse.Namespace:
         action="store_true",
         help="Include landmarks rejected by Maplab quality checks in the 3D view.",
     )
+    parser.add_argument(
+        "--loops-yaml", type=Path,
+        help="Verified loop edges; rendered against the exported optimized poses.",
+    )
     return parser.parse_args()
+
+
+def z_colormap(points: np.ndarray) -> np.ndarray:
+    """Robust Viridis-like RGB colors from landmark Z coordinates."""
+    if not len(points):
+        return np.empty((0, 3), dtype=np.uint8)
+    low, high = np.percentile(points[:, 2], [2.0, 98.0])
+    value = np.full(len(points), 0.5) if high <= low else np.clip(
+        (points[:, 2] - low) / (high - low), 0.0, 1.0)
+    palette = np.asarray(
+        [[68, 1, 84], [59, 82, 139], [33, 145, 140], [94, 201, 98], [253, 231, 37]],
+        dtype=np.float64,
+    )
+    location = value * (len(palette) - 1)
+    lower = np.floor(location).astype(np.int32)
+    upper = np.minimum(lower + 1, len(palette) - 1)
+    blend = (location - lower)[:, None]
+    return ((1.0 - blend) * palette[lower] + blend * palette[upper]).astype(np.uint8)
+
+
+def load_loop_indices(path: Path | None, timestamps: list[int]) -> list[tuple[int, int]]:
+    if path is None or not path.is_file():
+        return []
+    timestamp_to_index = {timestamp: index for index, timestamp in enumerate(timestamps)}
+    edges = yaml.safe_load(path.read_text(encoding="utf-8")) or []
+    result = []
+    for edge in edges:
+        start = timestamp_to_index.get(int(edge["camera_from"]["timestamp_ns"]))
+        end = timestamp_to_index.get(int(edge["camera_to"]["timestamp_ns"]))
+        if start is not None and end is not None:
+            result.append((start, end))
+    return result
 
 
 def extract_keyframe_images(
@@ -148,10 +185,12 @@ def main() -> None:
         int(item["current_index"]): item
         for item in report.get("pair_match_counts", [])
     }
+    vertex_timestamps = [int(row["timestamp_ns"]) for row in rows]
     if args.optimized_dir is not None:
         optimized_rows = load_csv(args.optimized_dir / "vertices.csv")
         if len(optimized_rows) != len(rows):
             raise ValueError("optimized vertex count does not match keyframes")
+        vertex_timestamps = [int(row["timestamp_ns"]) for row in optimized_rows]
         positions = np.asarray(
             [[float(row[f"p_{axis}_m"]) for axis in "xyz"] for row in optimized_rows]
         )
@@ -198,6 +237,8 @@ def main() -> None:
             unmatched = np.asarray([[u, v] for u, v, valid in points if not valid])
             keypoints_by_vertex[vertex_index] = (matched, unmatched)
 
+    loop_indices = load_loop_indices(args.loops_yaml, vertex_timestamps)
+
     edge_segments = np.stack([positions[:-1], positions[1:]], axis=1)
     initial_edge_segments = np.stack(
         [initial_positions[:-1], initial_positions[1:]], axis=1
@@ -225,7 +266,7 @@ def main() -> None:
             accel_biases, gyro_biases, rotations, initial_edge_segments,
             edge_segments, landmarks,
             bad_landmarks, keypoints_by_vertex, frame_keypoint_counts,
-            pair_match_counts, r_imu_camera, t_imu_camera, images,
+            pair_match_counts, loop_indices, r_imu_camera, t_imu_camera, images,
         )
     else:
         with tempfile.TemporaryDirectory(prefix="vimap-rerun-images-") as temp_dir:
@@ -235,7 +276,7 @@ def main() -> None:
                 accel_biases, gyro_biases, rotations, initial_edge_segments,
                 edge_segments, landmarks,
                 bad_landmarks, keypoints_by_vertex, frame_keypoint_counts,
-                pair_match_counts, r_imu_camera, t_imu_camera, images,
+                pair_match_counts, loop_indices, r_imu_camera, t_imu_camera, images,
             )
 
     print(
@@ -262,6 +303,7 @@ def write_rerun(
     keypoints_by_vertex: dict[int, tuple[np.ndarray, np.ndarray]],
     frame_keypoint_counts: list[int],
     pair_match_counts: dict[int, dict],
+    loop_indices: list[tuple[int, int]],
     r_imu_camera: np.ndarray,
     t_imu_camera: np.ndarray,
     images: list[Path],
@@ -276,6 +318,21 @@ def write_rerun(
         ),
         static=True,
     )
+    if loop_indices:
+        loop_segments = np.asarray([[positions[start], positions[end]] for start, end in loop_indices])
+        rr.log(
+            "world/loop_closures/accepted_edges",
+            rr.LineStrips3D(loop_segments, colors=[235, 70, 235], radii=0.006),
+            static=True,
+        )
+        rr.log(
+            "world/loop_closures/endpoints",
+            rr.Points3D(
+                np.asarray([positions[index] for edge in loop_indices for index in edge]),
+                colors=[235, 70, 235], radii=rr.Radius.ui_points(5.0),
+            ),
+            static=True,
+        )
     rr.log(
         "world/pose_graph/vertices",
         rr.Points3D(
@@ -316,7 +373,7 @@ def write_rerun(
             "world/landmarks",
             rr.Points3D(
                 landmarks,
-                colors=[255, 190, 70],
+                colors=z_colormap(landmarks),
                 radii=rr.Radius.ui_points(2.0),
             ),
             static=True,
@@ -352,6 +409,8 @@ def write_rerun(
                     f"bad landmarks: {len(bad_landmarks)}",
                     f"raw images: {len(images)}",
                     f"detected keypoints: {sum(frame_keypoint_counts)}",
+                    f"accepted loop edges: {len(loop_indices)}",
+                    "landmark color: robust Z height (purple low, yellow high)",
                     "pose: T_M_I, meters",
                     "camera: OpenCV RDF",
                     "extrinsic: initial T_C_I, translation zero",

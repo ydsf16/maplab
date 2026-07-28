@@ -31,12 +31,13 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--dinov2-checkpoint", type=Path, default=Path("/root/autodl-tmp/third_party/dinov2/dinov2_vitb14_pretrain.pth"))
     parser.add_argument("--top-k", type=int, default=20)
     parser.add_argument("--temporal-exclusion-frames", type=int, default=30)
-    parser.add_argument("--min-spatial-distance-m", type=float, default=0.5)
+    parser.add_argument("--min-trajectory-separation-m", type=float, default=0.5)
     parser.add_argument("--min-lightglue-score", type=float, default=0.15)
     parser.add_argument("--pnp-ransac-px", type=float, default=3.0)
-    parser.add_argument("--min-pnp-inliers", type=int, default=40)
+    parser.add_argument("--min-pnp-inliers", type=int, default=20)
     parser.add_argument("--support-window-frames", type=int, default=3)
     parser.add_argument("--min-support", type=int, default=2)
+    parser.add_argument("--loop-nms-frames", type=int, default=30)
     parser.add_argument("--device", default="cuda")
     return parser.parse_args()
 
@@ -190,6 +191,10 @@ def main() -> int:
     for vertex in vertices:
         T_M_I = transform(rotation_from_wxyz([float(vertex[key]) for key in ("q_w", "q_x", "q_y", "q_z")]), np.array([float(vertex[key]) for key in ("p_x_m", "p_y_m", "p_z_m")]))
         T_M_C.append(T_M_I @ T_I_C)
+    trajectory_distance = np.concatenate((
+        np.zeros(1, dtype=np.float64),
+        np.cumsum(np.linalg.norm(np.diff(np.asarray([pose[:3, 3] for pose in T_M_C]), axis=0), axis=1)),
+    ))
     landmark_xyz = {row["landmark_id"]: np.array([float(row[key]) for key in ("x_m", "y_m", "z_m")]) for row in landmarks}
     frame_export: dict[int, tuple[np.ndarray, list[str]]] = {}
     for frame in range(len(rows)):
@@ -218,12 +223,13 @@ def main() -> int:
                 continue
             seen_pairs.add(pair)
             spatial = float(np.linalg.norm(T_M_C[candidate][:3, 3] - T_M_C[query][:3, 3]))
-            base = {"query_frame": query, "candidate_frame": candidate, "salad_similarity": float(descriptors[query] @ descriptors[candidate]), "spatial_distance_m": spatial}
+            odom_distance = float(abs(trajectory_distance[candidate] - trajectory_distance[query]))
+            base = {"query_frame": query, "candidate_frame": candidate, "salad_similarity": float(descriptors[query] @ descriptors[candidate]), "spatial_distance_m": spatial, "trajectory_distance_m": odom_distance}
             if abs(candidate - query) <= args.temporal_exclusion_frames:
                 rejected.append(base | {"reason": "temporal_neighbor"})
                 continue
-            if spatial < args.min_spatial_distance_m:
-                rejected.append(base | {"reason": "spatial_distance_lt_threshold"})
+            if odom_distance < args.min_trajectory_separation_m:
+                rejected.append(base | {"reason": "trajectory_distance_lt_threshold"})
                 continue
             k0, k1, matches0, _, scores0, _ = session.run(None, {"image0": images[candidate], "image1": images[query]})
             k0, k1 = k0[0], k1[0]
@@ -232,7 +238,8 @@ def main() -> int:
                     cache[frame] = (points, keypoint_mapping(points, frame_export[frame][0]))
             ids0 = cache[candidate][1]
             chosen = np.flatnonzero((matches0[0] >= 0) & (scores0[0] >= args.min_lightglue_score))
-            object_points, image_points = [], []
+            object_points, image_points, correspondences = [], [], []
+            ids1 = cache[query][1]
             for index0 in chosen:
                 exported_index = int(ids0[index0])
                 if exported_index < 0:
@@ -241,6 +248,10 @@ def main() -> int:
                 if landmark_id in landmark_xyz:
                     object_points.append(landmark_xyz[landmark_id])
                     image_points.append(k1[int(matches0[0, index0])])
+                    correspondences.append({
+                        "candidate_landmark_id": landmark_id,
+                        "query_keypoint_index": int(ids1[int(matches0[0, index0])]),
+                    })
             if len(object_points) < args.min_pnp_inliers:
                 rejected.append(base | {"reason": "pnp_inliers", "pnp_inliers": 0, "lightglue_matches": int(len(chosen))})
                 continue
@@ -271,7 +282,7 @@ def main() -> int:
             T_Cq_M = transform(rotation, tvec.reshape(3))
             T_M_Cq_pnp = np.linalg.inv(T_Cq_M)
             delta = T_M_Cq_pnp @ np.linalg.inv(T_M_C[query])
-            verified.append(base | {"pnp_inliers": int(count), "median_reprojection_px": float(np.median(reprojection)), "T_from_to": np.linalg.inv(T_M_C[candidate]) @ T_M_Cq_pnp, "delta": delta, "covariance": covariance(object_array[inlier_ids], image_array[inlier_ids], rvec, tvec, camera)})
+            verified.append(base | {"pnp_inliers": int(count), "median_reprojection_px": float(np.median(reprojection)), "T_from_to": np.linalg.inv(T_M_C[candidate]) @ T_M_Cq_pnp, "delta": delta, "covariance": covariance(object_array[inlier_ids], image_array[inlier_ids], rvec, tvec, camera), "observations": [correspondences[int(index)] for index in inlier_ids if correspondences[int(index)]["query_keypoint_index"] >= 0]})
             kept += 1
             if kept >= args.top_k:
                 break
@@ -289,19 +300,38 @@ def main() -> int:
         winner = max(consistent, key=lambda item: int(item["pnp_inliers"]))
         candidate, query = int(winner["candidate_frame"]), int(winner["query_frame"])
         accepted.append({
+            "candidate_frame": candidate,
+            "query_frame": query,
+            "pnp_inliers": int(winner["pnp_inliers"]),
+            "median_reprojection_px": float(winner["median_reprojection_px"]),
             "camera_from": {"timestamp_ns": int(vertices[candidate]["timestamp_ns"]), "pose": yaml_transform(T_M_C[candidate])},
             "camera_to": {"timestamp_ns": int(vertices[query]["timestamp_ns"]), "pose": yaml_transform(T_M_C[query])},
             "T_from_to": yaml_transform(winner["T_from_to"]),
             "switch_variable": 1.0,
             "switch_variable_variance": 1e-4,
             "covariance": winner["covariance"].reshape(-1).tolist(),
+            "observations": winner["observations"],
         })
+    # A returning camera yields many adjacent verified pairs.  Keep one strong
+    # representative per temporal event, independently of its physical pose.
+    accepted.sort(key=lambda edge: (-edge["pnp_inliers"], edge["median_reprojection_px"]))
+    nms_accepted: list[dict[str, object]] = []
+    for edge in accepted:
+        first, second = sorted((int(edge["candidate_frame"]), int(edge["query_frame"])))
+        if any(
+            abs(first - min(int(kept["candidate_frame"]), int(kept["query_frame"]))) <= args.loop_nms_frames
+            and abs(second - max(int(kept["candidate_frame"]), int(kept["query_frame"]))) <= args.loop_nms_frames
+            for kept in nms_accepted
+        ):
+            continue
+        nms_accepted.append(edge)
+    accepted = nms_accepted
     (args.output / "verified_loops.yaml").write_text(yaml.safe_dump(accepted, sort_keys=False), encoding="utf-8")
     fields = sorted({key for row in rejected for key in row if not isinstance(row[key], np.ndarray)})
     with (args.output / "rejected_candidates.csv").open("w", newline="", encoding="utf-8") as stream:
         writer = csv.DictWriter(stream, fieldnames=fields)
         writer.writeheader(); writer.writerows([{key: value for key, value in row.items() if key in fields} for row in rejected])
-    report = {"backend": "DINOv2-SALAD + SuperPoint-LightGlue ONNX + PnP", "frames": len(rows), "top_k": args.top_k, "temporal_exclusion_frames": args.temporal_exclusion_frames, "min_spatial_distance_m": args.min_spatial_distance_m, "raw_pnp_verified": len(verified), "accepted_loops": len(accepted), "rejected": len(rejected), "lightglue_provider": session.get_providers()[0]}
+    report = {"backend": "DINOv2-SALAD + SuperPoint-LightGlue ONNX + PnP", "frames": len(rows), "top_k": args.top_k, "temporal_exclusion_frames": args.temporal_exclusion_frames, "loop_nms_frames": args.loop_nms_frames, "min_trajectory_separation_m": args.min_trajectory_separation_m, "min_pnp_inliers": args.min_pnp_inliers, "raw_pnp_verified": len(verified), "accepted_loops": len(accepted), "rejected": len(rejected), "lightglue_provider": session.get_providers()[0]}
     (args.output / "report.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(report, indent=2))
     return 0
