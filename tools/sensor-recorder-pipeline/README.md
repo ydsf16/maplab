@@ -146,3 +146,26 @@ On AutoDL, the default wrapper runs the native importer inside the isolated
 Ubuntu 20.04/ROS Noetic runtime. Its paths can be overridden with
 `MAPLAB_RUNTIME_ROOT`, `MAPLAB_RUNTIME_WORKSPACE`, and
 `MAPLAB_IMPORTER_BINARY`. The user-facing process does not start ROS.
+
+## Learning-based loop closure
+
+Run it after `04_visual_ba_intrinsics` exists:
+
+```bash
+bash process.sh loop-closure --output /root/data/maplab_results/SR_2026-07-22_22-24-31_sp_lg
+```
+
+DINOv2-SALAD retrieves the top 20 candidates. SuperPoint-LightGlue ONNX and
+2D-3D PnP verify them. Temporal neighbours and camera centres less than 2 m
+apart are rejected before local matching. A loop needs at least 40 PnP inliers,
+3 px RANSAC, grid coverage, and two consistent pairs in a temporal cluster.
+
+The frontend writes `loops/salad_lightglue_pnp/verified_loops.yaml` and full
+reject diagnostics without modifying stages 00--05. Verified loops produce
+`06_posegraph_salad_lightglue`, `07_global_visual_ba_loops`, and
+`08_visual_inertial_ba_loops_preview`. The last result remains a preview while
+the accelerometer sign is unresolved.
+
+SALAD uses local source and two external weight files so AutoDL needs no GitHub
+access at runtime. Defaults are `/root/autodl-tmp/third_party/{salad,dinov2}`
+with `dino_salad.ckpt` and `dinov2_vitb14_pretrain.pth`; weights stay out of Git.
