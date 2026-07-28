@@ -55,6 +55,9 @@ fi
 cp -a "$source_map" "$stage06/vi_map"
 run_native "$runtime_workspace/devel/lib/sensor_recorder_importer/sensor_recorder_posegraph_relax" \
   --map="$stage06/vi_map" --loops_yaml="$loops/verified_loops.yaml"
+run_native "$runtime_workspace/devel/lib/sensor_recorder_importer/sensor_recorder_loop_observations" \
+  --map="$stage06/vi_map" --loops_yaml="$loops/verified_loops.yaml" \
+  --min_merge_support=1
 cp "$source_stage/report.json" "$stage06/report.json"
 
 cp -a "$stage06/vi_map" "$stage07/vi_map"
@@ -76,7 +79,8 @@ for stage in "$stage06" "$stage07" "$stage08"; do
     python3 "$repo_dir/tools/sensor-recorder-pipeline/export_vimap_rerun.py" \
       --keyframes "$result/normalized/keyframes.csv" --report "$stage/report.json" \
       --config "$repo_dir/configs/iphone_arkit_640.json" --images-dir "$result/normalized/keyframe_images" \
-      --optimized-dir "$stage/export" --output "$result/rerun/$(basename "$stage").rrd"
+      --optimized-dir "$stage/export" --loops-yaml "$loops/verified_loops.yaml" \
+      --output "$result/rerun/$(basename "$stage").rrd"
   fi
 done
 echo "Loop, pose graph, visual BA and VI-BA preview complete."

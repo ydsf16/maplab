@@ -156,8 +156,9 @@ bash process.sh loop-closure --output /root/data/maplab_results/SR_2026-07-22_22
 ```
 
 DINOv2-SALAD retrieves the top 20 candidates. SuperPoint-LightGlue ONNX and
-2D-3D PnP verify them. Temporal neighbours and camera centres less than 0.5 m
-apart are rejected before local matching. A loop needs at least 40 PnP inliers,
+2D-3D PnP verify them. Temporal neighbours and pairs separated by less than 0.5 m
+along the current visual-odometry trajectory are rejected before local matching.
+A loop needs at least 20 PnP inliers,
 3 px RANSAC, grid coverage, and two consistent pairs in a temporal cluster.
 
 The frontend writes `loops/salad_lightglue_pnp/verified_loops.yaml` and full
