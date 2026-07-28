@@ -42,8 +42,8 @@ int main(int argc, char** argv) {
   vertices << "vertex_index,timestamp_ns,p_x_m,p_y_m,p_z_m,q_w,q_x,q_y,q_z,"
               "v_x_m_s,v_y_m_s,v_z_m_s,accel_bias_x,accel_bias_y,"
               "accel_bias_z,gyro_bias_x,gyro_bias_y,gyro_bias_z\n";
-  keypoints << "vertex_index,u_px,v_px,has_landmark\n";
-  landmarks << "x_m,y_m,z_m,observation_count,quality\n";
+  keypoints << "vertex_index,u_px,v_px,has_landmark,landmark_id\n";
+  landmarks << "landmark_id,x_m,y_m,z_m,observation_count,quality\n";
 
   size_t keypoint_count = 0u;
   size_t observation_count = 0u;
@@ -70,10 +70,12 @@ int main(int argc, char** argv) {
     const Eigen::Matrix2Xd& measurements = frame.getKeypointMeasurements();
     for (Eigen::Index keypoint_index = 0; keypoint_index < measurements.cols();
          ++keypoint_index) {
-      const bool has_landmark =
-          vertex.getObservedLandmarkId(0u, keypoint_index).isValid();
+      const vi_map::LandmarkId landmark_id =
+          vertex.getObservedLandmarkId(0u, keypoint_index);
+      const bool has_landmark = landmark_id.isValid();
       keypoints << vertex_index << ',' << measurements(0, keypoint_index) << ','
                 << measurements(1, keypoint_index) << ',' << has_landmark
+                << ',' << (has_landmark ? landmark_id.hexString() : "")
                 << '\n';
       ++keypoint_count;
       observation_count += has_landmark ? 1u : 0u;
@@ -84,7 +86,8 @@ int main(int argc, char** argv) {
   map.getAllLandmarkIds(&landmark_ids);
   for (const vi_map::LandmarkId& landmark_id : landmark_ids) {
     const Eigen::Vector3d p = map.getLandmark_G_p_fi(landmark_id);
-    landmarks << p.x() << ',' << p.y() << ',' << p.z() << ','
+    landmarks << landmark_id.hexString() << ',' << p.x() << ',' << p.y() << ','
+              << p.z() << ','
               << map.getLandmark(landmark_id).numberOfObservations() << ','
               << static_cast<int>(map.getLandmark(landmark_id).getQuality())
               << '\n';
