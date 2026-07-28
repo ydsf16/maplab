@@ -31,7 +31,7 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--dinov2-checkpoint", type=Path, default=Path("/root/autodl-tmp/third_party/dinov2/dinov2_vitb14_pretrain.pth"))
     parser.add_argument("--top-k", type=int, default=20)
     parser.add_argument("--temporal-exclusion-frames", type=int, default=30)
-    parser.add_argument("--min-spatial-distance-m", type=float, default=2.0)
+    parser.add_argument("--min-spatial-distance-m", type=float, default=0.5)
     parser.add_argument("--min-lightglue-score", type=float, default=0.15)
     parser.add_argument("--pnp-ransac-px", type=float, default=3.0)
     parser.add_argument("--min-pnp-inliers", type=int, default=40)
@@ -150,8 +150,9 @@ def salad_descriptors(paths: list[Path], device: str, salad_repo: Path, salad_ch
 def keypoint_mapping(points: np.ndarray, exported: np.ndarray) -> np.ndarray:
     distances = np.sum((points[:, None, :] - exported[None, :, :]) ** 2, axis=2)
     indices = distances.argmin(axis=1)
-    if np.sqrt(distances[np.arange(len(points)), indices]).max(initial=0.0) > 1.0:
-        raise RuntimeError("LightGlue keypoints no longer align with VI-Map keypoints")
+    # BA/pruning can remove individual keypoints.  Keep the remaining exact map
+    # association and discard only unmatched ONNX points from 2D-3D PnP.
+    indices[np.sqrt(distances[np.arange(len(points)), indices]) > 1.0] = -1
     return indices
 
 
@@ -222,7 +223,7 @@ def main() -> int:
                 rejected.append(base | {"reason": "temporal_neighbor"})
                 continue
             if spatial < args.min_spatial_distance_m:
-                rejected.append(base | {"reason": "spatial_distance_lt_2m"})
+                rejected.append(base | {"reason": "spatial_distance_lt_threshold"})
                 continue
             k0, k1, matches0, _, scores0, _ = session.run(None, {"image0": images[candidate], "image1": images[query]})
             k0, k1 = k0[0], k1[0]
@@ -233,7 +234,10 @@ def main() -> int:
             chosen = np.flatnonzero((matches0[0] >= 0) & (scores0[0] >= args.min_lightglue_score))
             object_points, image_points = [], []
             for index0 in chosen:
-                landmark_id = frame_export[candidate][1][int(ids0[index0])]
+                exported_index = int(ids0[index0])
+                if exported_index < 0:
+                    continue
+                landmark_id = frame_export[candidate][1][exported_index]
                 if landmark_id in landmark_xyz:
                     object_points.append(landmark_xyz[landmark_id])
                     image_points.append(k1[int(matches0[0, index0])])
@@ -249,20 +253,25 @@ def main() -> int:
                 rejected.append(base | {"reason": "geometric_inconsistency", "lightglue_matches": int(len(chosen)), "grid_cells": len(cells)})
                 continue
             camera = np.array([[float(rows[query]["fx_px"]), 0, float(rows[query]["cx_px"])], [0, float(rows[query]["fy_px"]), float(rows[query]["cy_px"])], [0, 0, 1]], dtype=np.float64)
-            ok, rvec, tvec, inliers = cv2.solvePnPRansac(np.array(object_points), np.array(image_points), camera, None, iterationsCount=2000, reprojectionError=args.pnp_ransac_px, confidence=0.999, flags=cv2.SOLVEPNP_EPNP)
+            object_array = np.asarray(object_points, dtype=np.float64)
+            image_array = np.asarray(image_points, dtype=np.float64)
+            # Positional arguments keep this compatible with OpenCV 4 and 5.
+            ok, rvec, tvec, inliers = cv2.solvePnPRansac(
+                object_array, image_array, camera, None, None, None, False,
+                2000, args.pnp_ransac_px, 0.999, cv2.SOLVEPNP_EPNP)
             count = 0 if inliers is None else len(inliers)
             if not ok or count < args.min_pnp_inliers:
                 rejected.append(base | {"reason": "pnp_inliers", "pnp_inliers": int(count), "lightglue_matches": int(len(chosen))})
                 continue
             inlier_ids = inliers.reshape(-1)
-            cv2.solvePnPRefineLM(np.array(object_points)[inlier_ids], np.array(image_points)[inlier_ids], camera, None, rvec, tvec)
-            projected, _ = cv2.projectPoints(np.array(object_points)[inlier_ids], rvec, tvec, camera, None)
-            reprojection = np.linalg.norm(np.array(image_points)[inlier_ids] - projected.reshape(-1, 2), axis=1)
+            cv2.solvePnPRefineLM(object_array[inlier_ids], image_array[inlier_ids], camera, None, rvec, tvec)
+            projected, _ = cv2.projectPoints(object_array[inlier_ids], rvec, tvec, camera, None)
+            reprojection = np.linalg.norm(image_array[inlier_ids] - projected.reshape(-1, 2), axis=1)
             rotation, _ = cv2.Rodrigues(rvec)
             T_Cq_M = transform(rotation, tvec.reshape(3))
             T_M_Cq_pnp = np.linalg.inv(T_Cq_M)
             delta = T_M_Cq_pnp @ np.linalg.inv(T_M_C[query])
-            verified.append(base | {"pnp_inliers": int(count), "median_reprojection_px": float(np.median(reprojection)), "T_from_to": np.linalg.inv(T_M_C[candidate]) @ T_M_Cq_pnp, "delta": delta, "covariance": covariance(np.array(object_points)[inlier_ids], np.array(image_points)[inlier_ids], rvec, tvec, camera)})
+            verified.append(base | {"pnp_inliers": int(count), "median_reprojection_px": float(np.median(reprojection)), "T_from_to": np.linalg.inv(T_M_C[candidate]) @ T_M_Cq_pnp, "delta": delta, "covariance": covariance(object_array[inlier_ids], image_array[inlier_ids], rvec, tvec, camera)})
             kept += 1
             if kept >= args.top_k:
                 break
