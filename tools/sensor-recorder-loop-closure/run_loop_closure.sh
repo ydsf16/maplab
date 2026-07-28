@@ -4,6 +4,7 @@ set -euo pipefail
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 result=""
 force=0
+run_visual_ba=0
 runtime_root="${MAPLAB_RUNTIME_ROOT:-/root/autodl-tmp/maplab-focal}"
 runtime_workspace="${MAPLAB_RUNTIME_WORKSPACE:-/workspace}"
 salad_python="${SALAD_PYTHON:-/root/miniconda3/bin/python}"
@@ -12,6 +13,7 @@ lightglue_model="${LIGHTGLUE_ONNX_MODEL:-/root/autodl-tmp/third_party/LightGlue-
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --output) result="$2"; shift 2 ;;
+    --run-visual-ba) run_visual_ba=1; shift ;;
     --force) force=1; shift ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
@@ -62,19 +64,23 @@ run_native "$runtime_workspace/devel/lib/sensor_recorder_importer/sensor_recorde
   --min_merge_support=1
 cp "$source_stage/report.json" "$stage06/report.json"
 
-cp -a "$stage06/vi_map" "$stage07/vi_map"
-run_native "$runtime_workspace/devel/lib/sensor_recorder_importer/sensor_recorder_brisk_ba" \
-  --map="$stage07/vi_map" --report="$stage07/report.json" --run_frontend=false --run_ba=true \
-  --use_imu=false --optimize_biases=false --optimize_velocity=false --optimize_intrinsics=false \
-  --optimize_extrinsics=false --ba_feature_type=SuperPoint --ba_iterations=50 --prune_bad_landmarks=true
-
-cp -a "$stage07/vi_map" "$stage08/vi_map"
+if [[ "$run_visual_ba" -eq 1 ]]; then
+  cp -a "$stage06/vi_map" "$stage07/vi_map"
+  run_native "$runtime_workspace/devel/lib/sensor_recorder_importer/sensor_recorder_brisk_ba" \
+    --map="$stage07/vi_map" --report="$stage07/report.json" --run_frontend=false --run_ba=true \
+    --use_imu=false --optimize_biases=false --optimize_velocity=false --optimize_intrinsics=false \
+    --optimize_extrinsics=false --ba_feature_type=SuperPoint --ba_iterations=50 --prune_bad_landmarks=true
+  cp -a "$stage07/vi_map" "$stage08/vi_map"
+else
+  rm -rf -- "$stage07"
+  cp -a "$stage06/vi_map" "$stage08/vi_map"
+fi
 run_native "$runtime_workspace/devel/lib/sensor_recorder_importer/sensor_recorder_brisk_ba" \
   --map="$stage08/vi_map" --report="$stage08/report.json" --run_frontend=false --run_ba=true \
   --use_imu=true --optimize_biases=true --optimize_velocity=true --optimize_intrinsics=false \
   --optimize_extrinsics=false --ba_feature_type=SuperPoint --ba_iterations=50 --prune_bad_landmarks=true
 
-for stage in "$stage06" "$stage07" "$stage08"; do
+for stage in "$stage06" "$stage08"; do
   run_native "$runtime_workspace/devel/lib/sensor_recorder_importer/sensor_recorder_vimap_export" \
     --map="$stage/vi_map" --output="$stage/export"
   if [[ -f "$stage/report.json" ]]; then
@@ -86,4 +92,14 @@ for stage in "$stage06" "$stage07" "$stage08"; do
       --output "$result/rerun/$(basename "$stage").rrd"
   fi
 done
+if [[ "$run_visual_ba" -eq 1 ]]; then
+  run_native "$runtime_workspace/devel/lib/sensor_recorder_importer/sensor_recorder_vimap_export" \
+    --map="$stage07/vi_map" --output="$stage07/export"
+  python3 "$repo_dir/tools/sensor-recorder-pipeline/export_vimap_rerun.py" \
+    --keyframes "$result/normalized/keyframes.csv" --report "$stage07/report.json" \
+    --config "$repo_dir/configs/iphone_arkit_640.json" --images-dir "$result/normalized/keyframe_images" \
+    --optimized-dir "$stage07/export" --loops-yaml "$loops/verified_loops.yaml" \
+    --pgo-decisions-yaml "$loops/accepted_loops_after_pgo.yaml" \
+    --output "$result/rerun/$(basename "$stage07").rrd"
+fi
 echo "Loop, pose graph, visual BA and VI-BA preview complete."
