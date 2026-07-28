@@ -91,6 +91,7 @@ rerun_python="${RERUN_PYTHON:-python3}"
   --config "${repo_dir}/configs/iphone_arkit_640.json" \
   --images-dir "${result}/normalized/keyframe_images" \
   --optimized-dir "${stage}/export" \
+  --pairs-csv "${features}/pairs.csv" \
   --output "${rrd}"
 "${rerun_python}" -m rerun rrd verify "${rrd}"
 echo "created ${rrd}"

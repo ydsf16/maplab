@@ -67,6 +67,10 @@ def parse_arguments() -> argparse.Namespace:
         "--pgo-decisions-yaml", type=Path,
         help="Pose-graph switch and residual decisions for loop candidates.",
     )
+    parser.add_argument(
+        "--pairs-csv", type=Path,
+        help="Frontend pair graph with sequential and pose-gated covisibility edges.",
+    )
     return parser.parse_args()
 
 
@@ -123,6 +127,24 @@ def load_pgo_decisions(
         loop_indices(accepted, timestamps), loop_indices(rejected, timestamps),
         accepted, rejected,
     )
+
+
+def load_covisibility_pairs(path: Path | None, vertex_count: int) -> dict[str, list[tuple[int, int, int]]]:
+    result: dict[str, list[tuple[int, int, int]]] = {"sequential": [], "pose_gated": []}
+    if path is None or not path.is_file():
+        return result
+    for row in load_csv(path):
+        if row.get("accepted") != "1":
+            continue
+        pair_type = row.get("pair_type", "sequential")
+        if pair_type not in result:
+            continue
+        frame0, frame1 = int(row["frame0"]), int(row["frame1"])
+        if 0 <= frame0 < vertex_count and 0 <= frame1 < vertex_count:
+            result[pair_type].append(
+                (frame0, frame1, int(row.get("geometric_inliers", 0)))
+            )
+    return result
 
 
 def extract_keyframe_images(
@@ -268,6 +290,7 @@ def main() -> None:
     accepted_loop_indices, rejected_loop_indices, accepted_loop_records, rejected_loop_records = (
         load_pgo_decisions(args.pgo_decisions_yaml, vertex_timestamps)
     )
+    covisibility_pairs = load_covisibility_pairs(args.pairs_csv, len(rows))
 
     edge_segments = np.stack([positions[:-1], positions[1:]], axis=1)
     initial_edge_segments = np.stack(
@@ -298,6 +321,7 @@ def main() -> None:
             bad_landmarks, keypoints_by_vertex, frame_keypoint_counts,
             pair_match_counts, candidate_loop_indices, accepted_loop_indices,
             rejected_loop_indices, accepted_loop_records, rejected_loop_records,
+            covisibility_pairs,
             r_imu_camera, t_imu_camera, images,
         )
     else:
@@ -310,6 +334,7 @@ def main() -> None:
                 bad_landmarks, keypoints_by_vertex, frame_keypoint_counts,
                 pair_match_counts, candidate_loop_indices, accepted_loop_indices,
                 rejected_loop_indices, accepted_loop_records, rejected_loop_records,
+                covisibility_pairs,
                 r_imu_camera, t_imu_camera, images,
             )
 
@@ -342,6 +367,7 @@ def write_rerun(
     rejected_loop_indices: list[tuple[int, int]],
     accepted_loop_records: list[dict],
     rejected_loop_records: list[dict],
+    covisibility_pairs: dict[str, list[tuple[int, int, int]]],
     r_imu_camera: np.ndarray,
     t_imu_camera: np.ndarray,
     images: list[Path],
@@ -376,6 +402,19 @@ def write_rerun(
     log_loop_edges("world/loop_closures/pnp_candidates", candidate_loop_indices, [150, 150, 150])
     log_loop_edges("world/loop_closures/pgo_accepted", accepted_loop_indices, [70, 230, 110])
     log_loop_edges("world/loop_closures/pgo_rejected", rejected_loop_indices, [245, 70, 70])
+    for pair_type, color in (("sequential", [85, 170, 255]), ("pose_gated", [255, 175, 45])):
+        pairs = covisibility_pairs[pair_type]
+        if not pairs:
+            continue
+        segments = np.asarray([[positions[first], positions[second]] for first, second, _ in pairs])
+        rr.log(
+            f"world/covisibility/{pair_type}",
+            rr.LineStrips3D(segments, colors=color, radii=0.0035), static=True,
+        )
+        rr.log(
+            f"diagnostics/covisibility/{pair_type}_inliers",
+            rr.Scalars([float(inliers) for _, _, inliers in pairs]), static=True,
+        )
     rr.log(
         "world/pose_graph/vertices",
         rr.Points3D(
@@ -455,6 +494,8 @@ def write_rerun(
                     f"PnP loop candidates: {len(candidate_loop_indices)}",
                     f"PGO accepted loop edges: {len(accepted_loop_indices)}",
                     f"PGO rejected loop edges: {len(rejected_loop_indices)}",
+                    f"sequential covisibility edges: {len(covisibility_pairs['sequential'])}",
+                    f"pose-gated covisibility edges: {len(covisibility_pairs['pose_gated'])}",
                     "PGO gate: switch >= 0.8, Mahalanobis^2 <= 12.59",
                     "landmark color: robust Z height (purple low, yellow high)",
                     "pose: T_M_I, meters",
