@@ -7,6 +7,7 @@ import argparse
 import csv
 import json
 import math
+import itertools
 from collections import defaultdict
 from pathlib import Path
 
@@ -38,6 +39,7 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--support-window-frames", type=int, default=3)
     parser.add_argument("--min-support", type=int, default=2)
     parser.add_argument("--loop-nms-frames", type=int, default=30)
+    parser.add_argument("--covisibility-min-landmarks", type=int, default=20)
     parser.add_argument("--device", default="cuda")
     return parser.parse_args()
 
@@ -200,6 +202,21 @@ def main() -> int:
     for frame in range(len(rows)):
         frame_rows = [row for row in exported_keypoints if int(row["vertex_index"]) == frame]
         frame_export[frame] = (np.array([[float(row["u_px"]), float(row["v_px"])] for row in frame_rows]), [row["landmark_id"] for row in frame_rows])
+    observers: dict[str, set[int]] = defaultdict(set)
+    for frame, (_, landmark_ids) in frame_export.items():
+        for landmark_id in landmark_ids:
+            if landmark_id in landmark_xyz:
+                observers[landmark_id].add(frame)
+    covisibility: dict[tuple[int, int], int] = defaultdict(int)
+    for frames in observers.values():
+        for first, second in itertools.combinations(sorted(frames), 2):
+            covisibility[(first, second)] += 1
+    with (args.output / "covisibility_graph.csv").open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(stream, fieldnames=["first_frame", "second_frame", "shared_landmarks"])
+        writer.writeheader()
+        writer.writerows({"first_frame": first, "second_frame": second, "shared_landmarks": count}
+                         for (first, second), count in sorted(covisibility.items())
+                         if count >= args.covisibility_min_landmarks)
     image_paths = [args.normalized_data / row["image_path"] for row in rows]
     descriptors = salad_descriptors(
         image_paths, args.device, args.salad_repo, args.salad_checkpoint,
@@ -230,6 +247,9 @@ def main() -> int:
                 continue
             if odom_distance < args.min_trajectory_separation_m:
                 rejected.append(base | {"reason": "trajectory_distance_lt_threshold"})
+                continue
+            if covisibility.get(pair, 0) >= args.covisibility_min_landmarks:
+                rejected.append(base | {"reason": "covisibility_neighbor", "shared_landmarks": covisibility[pair]})
                 continue
             k0, k1, matches0, _, scores0, _ = session.run(None, {"image0": images[candidate], "image1": images[query]})
             k0, k1 = k0[0], k1[0]
@@ -282,7 +302,9 @@ def main() -> int:
             T_Cq_M = transform(rotation, tvec.reshape(3))
             T_M_Cq_pnp = np.linalg.inv(T_Cq_M)
             delta = T_M_Cq_pnp @ np.linalg.inv(T_M_C[query])
-            verified.append(base | {"pnp_inliers": int(count), "median_reprojection_px": float(np.median(reprojection)), "T_from_to": np.linalg.inv(T_M_C[candidate]) @ T_M_Cq_pnp, "delta": delta, "covariance": covariance(object_array[inlier_ids], image_array[inlier_ids], rvec, tvec, camera), "observations": [correspondences[int(index)] for index in inlier_ids if correspondences[int(index)]["query_keypoint_index"] >= 0]})
+            T_from_to = np.linalg.inv(T_M_C[candidate]) @ T_M_Cq_pnp
+            disagreement = np.linalg.inv(np.linalg.inv(T_M_C[candidate]) @ T_M_C[query]) @ T_from_to
+            verified.append(base | {"pnp_inliers": int(count), "median_reprojection_px": float(np.median(reprojection)), "T_from_to": T_from_to, "delta": delta, "covariance": covariance(object_array[inlier_ids], image_array[inlier_ids], rvec, tvec, camera), "odom_pnp_translation_difference_m": float(np.linalg.norm(disagreement[:3, 3])), "odom_pnp_rotation_difference_deg": angle_deg(disagreement[:3, :3]), "observations": [correspondences[int(index)] for index in inlier_ids if correspondences[int(index)]["query_keypoint_index"] >= 0]})
             kept += 1
             if kept >= args.top_k:
                 break
@@ -304,6 +326,8 @@ def main() -> int:
             "query_frame": query,
             "pnp_inliers": int(winner["pnp_inliers"]),
             "median_reprojection_px": float(winner["median_reprojection_px"]),
+            "odom_pnp_translation_difference_m": float(winner["odom_pnp_translation_difference_m"]),
+            "odom_pnp_rotation_difference_deg": float(winner["odom_pnp_rotation_difference_deg"]),
             "camera_from": {"timestamp_ns": int(vertices[candidate]["timestamp_ns"]), "pose": yaml_transform(T_M_C[candidate])},
             "camera_to": {"timestamp_ns": int(vertices[query]["timestamp_ns"]), "pose": yaml_transform(T_M_C[query])},
             "T_from_to": yaml_transform(winner["T_from_to"]),
@@ -331,7 +355,7 @@ def main() -> int:
     with (args.output / "rejected_candidates.csv").open("w", newline="", encoding="utf-8") as stream:
         writer = csv.DictWriter(stream, fieldnames=fields)
         writer.writeheader(); writer.writerows([{key: value for key, value in row.items() if key in fields} for row in rejected])
-    report = {"backend": "DINOv2-SALAD + SuperPoint-LightGlue ONNX + PnP", "frames": len(rows), "top_k": args.top_k, "temporal_exclusion_frames": args.temporal_exclusion_frames, "loop_nms_frames": args.loop_nms_frames, "min_trajectory_separation_m": args.min_trajectory_separation_m, "min_pnp_inliers": args.min_pnp_inliers, "raw_pnp_verified": len(verified), "accepted_loops": len(accepted), "rejected": len(rejected), "lightglue_provider": session.get_providers()[0]}
+    report = {"backend": "DINOv2-SALAD + SuperPoint-LightGlue ONNX + PnP", "frames": len(rows), "top_k": args.top_k, "temporal_exclusion_frames": args.temporal_exclusion_frames, "loop_nms_frames": args.loop_nms_frames, "covisibility_min_landmarks": args.covisibility_min_landmarks, "min_trajectory_separation_m": args.min_trajectory_separation_m, "min_pnp_inliers": args.min_pnp_inliers, "raw_pnp_verified": len(verified), "accepted_loops": len(accepted), "rejected": len(rejected), "lightglue_provider": session.get_providers()[0]}
     (args.output / "report.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(report, indent=2))
     return 0

@@ -61,7 +61,11 @@ def parse_arguments() -> argparse.Namespace:
     )
     parser.add_argument(
         "--loops-yaml", type=Path,
-        help="Verified loop edges; rendered against the exported optimized poses.",
+        help="Verified PnP loop candidates; rendered against the exported optimized poses.",
+    )
+    parser.add_argument(
+        "--pgo-decisions-yaml", type=Path,
+        help="Pose-graph switch and residual decisions for loop candidates.",
     )
     return parser.parse_args()
 
@@ -84,18 +88,41 @@ def z_colormap(points: np.ndarray) -> np.ndarray:
     return ((1.0 - blend) * palette[lower] + blend * palette[upper]).astype(np.uint8)
 
 
-def load_loop_indices(path: Path | None, timestamps: list[int]) -> list[tuple[int, int]]:
-    if path is None or not path.is_file():
-        return []
+def loop_indices(edges: list[dict], timestamps: list[int]) -> list[tuple[int, int]]:
     timestamp_to_index = {timestamp: index for index, timestamp in enumerate(timestamps)}
-    edges = yaml.safe_load(path.read_text(encoding="utf-8")) or []
     result = []
     for edge in edges:
-        start = timestamp_to_index.get(int(edge["camera_from"]["timestamp_ns"]))
-        end = timestamp_to_index.get(int(edge["camera_to"]["timestamp_ns"]))
+        try:
+            start = timestamp_to_index.get(int(edge["camera_from"]["timestamp_ns"]))
+            end = timestamp_to_index.get(int(edge["camera_to"]["timestamp_ns"]))
+        except (KeyError, TypeError, ValueError):
+            continue
         if start is not None and end is not None:
             result.append((start, end))
     return result
+
+
+def load_loop_indices(path: Path | None, timestamps: list[int]) -> list[tuple[int, int]]:
+    if path is None or not path.is_file():
+        return []
+    edges = yaml.safe_load(path.read_text(encoding="utf-8")) or []
+    return loop_indices(edges if isinstance(edges, list) else [], timestamps)
+
+
+def load_pgo_decisions(
+    path: Path | None, timestamps: list[int]
+) -> tuple[list[tuple[int, int]], list[tuple[int, int]], list[dict], list[dict]]:
+    if path is None or not path.is_file():
+        return [], [], [], []
+    document = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    if isinstance(document, list):
+        document = {"accepted": document, "rejected": []}
+    accepted = document.get("accepted", []) if isinstance(document, dict) else []
+    rejected = document.get("rejected", []) if isinstance(document, dict) else []
+    return (
+        loop_indices(accepted, timestamps), loop_indices(rejected, timestamps),
+        accepted, rejected,
+    )
 
 
 def extract_keyframe_images(
@@ -237,7 +264,10 @@ def main() -> None:
             unmatched = np.asarray([[u, v] for u, v, valid in points if not valid])
             keypoints_by_vertex[vertex_index] = (matched, unmatched)
 
-    loop_indices = load_loop_indices(args.loops_yaml, vertex_timestamps)
+    candidate_loop_indices = load_loop_indices(args.loops_yaml, vertex_timestamps)
+    accepted_loop_indices, rejected_loop_indices, accepted_loop_records, rejected_loop_records = (
+        load_pgo_decisions(args.pgo_decisions_yaml, vertex_timestamps)
+    )
 
     edge_segments = np.stack([positions[:-1], positions[1:]], axis=1)
     initial_edge_segments = np.stack(
@@ -266,7 +296,9 @@ def main() -> None:
             accel_biases, gyro_biases, rotations, initial_edge_segments,
             edge_segments, landmarks,
             bad_landmarks, keypoints_by_vertex, frame_keypoint_counts,
-            pair_match_counts, loop_indices, r_imu_camera, t_imu_camera, images,
+            pair_match_counts, candidate_loop_indices, accepted_loop_indices,
+            rejected_loop_indices, accepted_loop_records, rejected_loop_records,
+            r_imu_camera, t_imu_camera, images,
         )
     else:
         with tempfile.TemporaryDirectory(prefix="vimap-rerun-images-") as temp_dir:
@@ -276,7 +308,9 @@ def main() -> None:
                 accel_biases, gyro_biases, rotations, initial_edge_segments,
                 edge_segments, landmarks,
                 bad_landmarks, keypoints_by_vertex, frame_keypoint_counts,
-                pair_match_counts, loop_indices, r_imu_camera, t_imu_camera, images,
+                pair_match_counts, candidate_loop_indices, accepted_loop_indices,
+                rejected_loop_indices, accepted_loop_records, rejected_loop_records,
+                r_imu_camera, t_imu_camera, images,
             )
 
     print(
@@ -303,7 +337,11 @@ def write_rerun(
     keypoints_by_vertex: dict[int, tuple[np.ndarray, np.ndarray]],
     frame_keypoint_counts: list[int],
     pair_match_counts: dict[int, dict],
-    loop_indices: list[tuple[int, int]],
+    candidate_loop_indices: list[tuple[int, int]],
+    accepted_loop_indices: list[tuple[int, int]],
+    rejected_loop_indices: list[tuple[int, int]],
+    accepted_loop_records: list[dict],
+    rejected_loop_records: list[dict],
     r_imu_camera: np.ndarray,
     t_imu_camera: np.ndarray,
     images: list[Path],
@@ -318,21 +356,26 @@ def write_rerun(
         ),
         static=True,
     )
-    if loop_indices:
-        loop_segments = np.asarray([[positions[start], positions[end]] for start, end in loop_indices])
+    def log_loop_edges(path: str, indices: list[tuple[int, int]], color: list[int]) -> None:
+        if not indices:
+            return
+        loop_segments = np.asarray([[positions[start], positions[end]] for start, end in indices])
         rr.log(
-            "world/loop_closures/accepted_edges",
-            rr.LineStrips3D(loop_segments, colors=[235, 70, 235], radii=0.006),
+            path,
+            rr.LineStrips3D(loop_segments, colors=color, radii=0.006),
             static=True,
         )
         rr.log(
-            "world/loop_closures/endpoints",
+            f"{path}/endpoints",
             rr.Points3D(
-                np.asarray([positions[index] for edge in loop_indices for index in edge]),
-                colors=[235, 70, 235], radii=rr.Radius.ui_points(5.0),
+                np.asarray([positions[index] for edge in indices for index in edge]),
+                colors=color, radii=rr.Radius.ui_points(5.0),
             ),
             static=True,
         )
+    log_loop_edges("world/loop_closures/pnp_candidates", candidate_loop_indices, [150, 150, 150])
+    log_loop_edges("world/loop_closures/pgo_accepted", accepted_loop_indices, [70, 230, 110])
+    log_loop_edges("world/loop_closures/pgo_rejected", rejected_loop_indices, [245, 70, 70])
     rr.log(
         "world/pose_graph/vertices",
         rr.Points3D(
@@ -409,7 +452,10 @@ def write_rerun(
                     f"bad landmarks: {len(bad_landmarks)}",
                     f"raw images: {len(images)}",
                     f"detected keypoints: {sum(frame_keypoint_counts)}",
-                    f"accepted loop edges: {len(loop_indices)}",
+                    f"PnP loop candidates: {len(candidate_loop_indices)}",
+                    f"PGO accepted loop edges: {len(accepted_loop_indices)}",
+                    f"PGO rejected loop edges: {len(rejected_loop_indices)}",
+                    "PGO gate: switch >= 0.8, Mahalanobis^2 <= 12.59",
                     "landmark color: robust Z height (purple low, yellow high)",
                     "pose: T_M_I, meters",
                     "camera: OpenCV RDF",
@@ -419,6 +465,18 @@ def write_rerun(
         ),
         static=True,
     )
+    for decision, records in (("accepted", accepted_loop_records), ("rejected", rejected_loop_records)):
+        for record_index, record in enumerate(records):
+            switch = record.get("pgo_switch_variable", float("nan"))
+            mahalanobis = record.get("pgo_mahalanobis_squared", float("nan"))
+            reason = record.get("pgo_rejection_reason", "")
+            rr.log(
+                f"diagnostics/loop_pgo/{decision}/{record_index}",
+                rr.TextDocument(
+                    f"switch: {switch}\\nMahalanobis^2: {mahalanobis}\\nreason: {reason}"
+                ),
+                static=True,
+            )
 
     for index, (row, position, rotation, image) in enumerate(
         zip(rows, positions, rotations, images)

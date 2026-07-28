@@ -54,9 +54,11 @@ if [[ ! -s "$loops/verified_loops.yaml" || "$(grep -c 'camera_from:' "$loops/ver
 fi
 cp -a "$source_map" "$stage06/vi_map"
 run_native "$runtime_workspace/devel/lib/sensor_recorder_importer/sensor_recorder_posegraph_relax" \
-  --map="$stage06/vi_map" --loops_yaml="$loops/verified_loops.yaml"
-run_native "$runtime_workspace/devel/lib/sensor_recorder_importer/sensor_recorder_loop_observations" \
   --map="$stage06/vi_map" --loops_yaml="$loops/verified_loops.yaml" \
+  --accepted_loops_yaml="$loops/accepted_loops_after_pgo.yaml" \
+  --min_switch_variable=0.8 --max_mahalanobis_squared=12.59
+run_native "$runtime_workspace/devel/lib/sensor_recorder_importer/sensor_recorder_loop_observations" \
+  --map="$stage06/vi_map" --loops_yaml="$loops/accepted_loops_after_pgo.yaml" \
   --min_merge_support=1
 cp "$source_stage/report.json" "$stage06/report.json"
 
@@ -80,6 +82,7 @@ for stage in "$stage06" "$stage07" "$stage08"; do
       --keyframes "$result/normalized/keyframes.csv" --report "$stage/report.json" \
       --config "$repo_dir/configs/iphone_arkit_640.json" --images-dir "$result/normalized/keyframe_images" \
       --optimized-dir "$stage/export" --loops-yaml "$loops/verified_loops.yaml" \
+      --pgo-decisions-yaml "$loops/accepted_loops_after_pgo.yaml" \
       --output "$result/rerun/$(basename "$stage").rrd"
   fi
 done

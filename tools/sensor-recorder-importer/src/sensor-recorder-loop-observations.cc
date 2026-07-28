@@ -27,7 +27,9 @@ struct Observation {
 
 std::vector<Observation> loadObservations(const std::string& filename) {
   std::vector<Observation> observations;
-  for (const YAML::Node& loop : YAML::LoadFile(filename)) {
+  const YAML::Node root = YAML::LoadFile(filename);
+  const YAML::Node loops = root["accepted"] ? root["accepted"] : root;
+  for (const YAML::Node& loop : loops) {
     const uint64_t query_timestamp_ns =
         loop["camera_to"]["timestamp_ns"].as<uint64_t>();
     const YAML::Node pnp_observations = loop["observations"];
