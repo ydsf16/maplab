@@ -12,6 +12,7 @@ from collections import defaultdict
 from pathlib import Path
 
 import cv2
+import faiss
 import numpy as np
 import onnxruntime as ort
 import torch
@@ -30,7 +31,11 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--salad-checkpoint", type=Path, default=Path("/root/autodl-tmp/third_party/salad/dino_salad.ckpt"))
     parser.add_argument("--dinov2-repo", type=Path, default=Path("/root/autodl-tmp/third_party/dinov2"))
     parser.add_argument("--dinov2-checkpoint", type=Path, default=Path("/root/autodl-tmp/third_party/dinov2/dinov2_vitb14_pretrain.pth"))
-    parser.add_argument("--top-k", type=int, default=20)
+    parser.add_argument("--top-k", type=int, default=10)
+    parser.add_argument(
+        "--high-recall", action="store_true",
+        help="Use 20 SALAD candidates per query instead of the faster default 10.",
+    )
     parser.add_argument("--temporal-exclusion-frames", type=int, default=30)
     parser.add_argument("--min-trajectory-separation-m", type=float, default=0.5)
     parser.add_argument("--min-lightglue-score", type=float, default=0.15)
@@ -179,6 +184,8 @@ def covariance(object_points: np.ndarray, image_points: np.ndarray, rvec: np.nda
 
 def main() -> int:
     args = arguments()
+    if args.high_recall:
+        args.top_k = 20
     args.output.mkdir(parents=True, exist_ok=True)
     rows = read_csv(args.normalized_data / "keyframes.csv")
     vertices = read_csv(args.optimized_dir / "vertices.csv")
@@ -222,6 +229,15 @@ def main() -> int:
         image_paths, args.device, args.salad_repo, args.salad_checkpoint,
         args.dinov2_repo, args.dinov2_checkpoint)
     np.save(args.output / "salad_descriptors.npy", descriptors)
+    # Exact inner-product FAISS index: equivalent ranking for normalized SALAD
+    # descriptors today, but avoids an O(N^2) Python/Numpy retrieval path as
+    # recordings become much longer.
+    index = faiss.IndexFlatIP(descriptors.shape[1])
+    index.add(np.ascontiguousarray(descriptors.astype(np.float32)))
+    _, retrieval_indices = index.search(
+        np.ascontiguousarray(descriptors.astype(np.float32)),
+        min(len(rows), args.top_k + args.temporal_exclusion_frames + 1),
+    )
     if hasattr(ort, "preload_dlls"):
         ort.preload_dlls()
     session = ort.InferenceSession(str(args.lightglue_model), providers=["CUDAExecutionProvider", "CPUExecutionProvider"])
@@ -231,8 +247,7 @@ def main() -> int:
     verified: list[dict[str, object]] = []
     seen_pairs: set[tuple[int, int]] = set()
     for query in range(len(rows)):
-        ranked = np.argsort(-(descriptors @ descriptors[query]))
-        candidates = [int(index) for index in ranked if int(index) != query][:args.top_k + args.temporal_exclusion_frames]
+        candidates = [int(index) for index in retrieval_indices[query] if int(index) != query]
         kept = 0
         for candidate in candidates:
             pair = tuple(sorted((candidate, query)))
@@ -355,7 +370,7 @@ def main() -> int:
     with (args.output / "rejected_candidates.csv").open("w", newline="", encoding="utf-8") as stream:
         writer = csv.DictWriter(stream, fieldnames=fields)
         writer.writeheader(); writer.writerows([{key: value for key, value in row.items() if key in fields} for row in rejected])
-    report = {"backend": "DINOv2-SALAD + SuperPoint-LightGlue ONNX + PnP", "frames": len(rows), "top_k": args.top_k, "temporal_exclusion_frames": args.temporal_exclusion_frames, "loop_nms_frames": args.loop_nms_frames, "covisibility_min_landmarks": args.covisibility_min_landmarks, "min_trajectory_separation_m": args.min_trajectory_separation_m, "min_pnp_inliers": args.min_pnp_inliers, "raw_pnp_verified": len(verified), "accepted_loops": len(accepted), "rejected": len(rejected), "lightglue_provider": session.get_providers()[0]}
+    report = {"backend": "DINOv2-SALAD + SuperPoint-LightGlue ONNX + PnP", "retrieval": "faiss_exact_inner_product", "frames": len(rows), "top_k": args.top_k, "temporal_exclusion_frames": args.temporal_exclusion_frames, "loop_nms_frames": args.loop_nms_frames, "covisibility_min_landmarks": args.covisibility_min_landmarks, "min_trajectory_separation_m": args.min_trajectory_separation_m, "min_pnp_inliers": args.min_pnp_inliers, "raw_pnp_verified": len(verified), "accepted_loops": len(accepted), "rejected": len(rejected), "lightglue_provider": session.get_providers()[0]}
     (args.output / "report.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(report, indent=2))
     return 0
