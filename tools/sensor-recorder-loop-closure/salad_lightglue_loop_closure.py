@@ -8,6 +8,7 @@ import csv
 import json
 import math
 import itertools
+import time
 from collections import defaultdict
 from pathlib import Path
 
@@ -26,26 +27,38 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--optimized-dir", required=True, type=Path)
     parser.add_argument("--optimized-report", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument("--lightglue-model", required=True, type=Path)
+    parser.add_argument("--lightglue-model", type=Path, help="Legacy fused SuperPoint+LightGlue ONNX model.")
+    parser.add_argument("--superpoint-model", type=Path, help="Split SuperPoint ONNX model.")
+    parser.add_argument("--lightglue-matcher-model", type=Path, help="Split LightGlue ONNX model.")
+    parser.add_argument("--feature-cache", type=Path, help="Per-frame frontend SuperPoint cache directory.")
     parser.add_argument("--salad-repo", type=Path, default=Path("/root/autodl-tmp/third_party/salad"))
     parser.add_argument("--salad-checkpoint", type=Path, default=Path("/root/autodl-tmp/third_party/salad/dino_salad.ckpt"))
     parser.add_argument("--dinov2-repo", type=Path, default=Path("/root/autodl-tmp/third_party/dinov2"))
     parser.add_argument("--dinov2-checkpoint", type=Path, default=Path("/root/autodl-tmp/third_party/dinov2/dinov2_vitb14_pretrain.pth"))
     parser.add_argument("--top-k", type=int, default=10)
+    parser.add_argument("--retrieval-pool-size", type=int, default=10,
+                        help="SALAD candidates considered before adaptive similarity gating.")
+    parser.add_argument("--covisibility-similarity-ratio", type=float, default=0.5)
+    parser.add_argument("--min-salad-similarity", type=float, default=0.0,
+                        help="Fallback SALAD threshold for frames without covisible neighbors.")
     parser.add_argument(
         "--high-recall", action="store_true",
         help="Use 20 SALAD candidates per query instead of the faster default 10.",
     )
     parser.add_argument("--temporal-exclusion-frames", type=int, default=30)
     parser.add_argument("--min-trajectory-separation-m", type=float, default=0.5)
+    parser.add_argument("--max-spatial-candidate-distance-m", type=float, default=10.0,
+                        help="Reject a candidate before LightGlue/PnP when current camera centers are farther apart.")
     parser.add_argument("--min-lightglue-score", type=float, default=0.15)
     parser.add_argument("--pnp-ransac-px", type=float, default=3.0)
     parser.add_argument("--min-pnp-inliers", type=int, default=20)
+    parser.add_argument("--max-loop-delta-translation-m", type=float, default=4.0)
     parser.add_argument("--support-window-frames", type=int, default=3)
     parser.add_argument("--min-support", type=int, default=2)
     parser.add_argument("--loop-nms-frames", type=int, default=30)
     parser.add_argument("--covisibility-min-landmarks", type=int, default=20)
     parser.add_argument("--device", default="cuda")
+    parser.add_argument("--salad-batch-size", type=int, default=16)
     return parser.parse_args()
 
 
@@ -108,7 +121,7 @@ def angle_deg(rotation: np.ndarray) -> float:
 
 
 def salad_descriptors(paths: list[Path], device: str, salad_repo: Path, salad_checkpoint: Path,
-                      dinov2_repo: Path, dinov2_checkpoint: Path) -> np.ndarray:
+                      dinov2_repo: Path, dinov2_checkpoint: Path, batch_size: int) -> tuple[np.ndarray, list[float]]:
     """Load SALAD fully offline, including its DINOv2 backbone weights."""
     for path in (salad_repo, salad_checkpoint, dinov2_repo, dinov2_checkpoint):
         if not path.exists():
@@ -145,14 +158,24 @@ def salad_descriptors(paths: list[Path], device: str, salad_repo: Path, salad_ch
         tensor = (tensor - torch.tensor([0.485, 0.456, 0.406])[:, None, None]) / torch.tensor([0.229, 0.224, 0.225])[:, None, None]
         tensors.append(tensor)
     output: list[np.ndarray] = []
+    per_frame_ms: list[float] = []
     with torch.inference_mode():
-        for start in range(0, len(tensors), 8):
-            result = model(torch.stack(tensors[start:start + 8]).to(device))
+        for start in range(0, len(tensors), batch_size):
+            batch_start = time.perf_counter()
+            result = model(torch.stack(tensors[start:start + batch_size]).to(device))
+            if device.startswith("cuda"):
+                torch.cuda.synchronize()
             if isinstance(result, dict):
                 result = result["global_descriptor"]
+            per_frame_ms.extend([1000.0 * (time.perf_counter() - batch_start) / len(result)] * len(result))
             output.append(result.detach().float().cpu().numpy())
     descriptors = np.concatenate(output, axis=0)
-    return descriptors / np.linalg.norm(descriptors, axis=1, keepdims=True)
+    return descriptors / np.linalg.norm(descriptors, axis=1, keepdims=True), per_frame_ms
+
+
+def normalize_keypoints(points: np.ndarray, width: int, height: int) -> np.ndarray:
+    size = np.array([width, height], dtype=np.float32)
+    return ((points - size / 2.0) / (max(width, height) / 2.0)).astype(np.float32)
 
 
 def keypoint_mapping(points: np.ndarray, exported: np.ndarray) -> np.ndarray:
@@ -184,8 +207,20 @@ def covariance(object_points: np.ndarray, image_points: np.ndarray, rvec: np.nda
 
 def main() -> int:
     args = arguments()
+    split_models = args.superpoint_model is not None or args.lightglue_matcher_model is not None
+    if split_models and (args.superpoint_model is None or args.lightglue_matcher_model is None):
+        raise RuntimeError("--superpoint-model and --lightglue-matcher-model must be supplied together")
+    if not split_models and args.lightglue_model is None:
+        raise RuntimeError("supply --lightglue-model or both split ONNX model paths")
+    if args.feature_cache is not None and not split_models:
+        raise RuntimeError("--feature-cache requires split SuperPoint and LightGlue models")
+    if args.salad_batch_size < 1:
+        raise RuntimeError("--salad-batch-size must be positive")
     if args.high_recall:
         args.top_k = 20
+        args.retrieval_pool_size = max(args.retrieval_pool_size, 20)
+    if args.retrieval_pool_size < args.top_k:
+        raise RuntimeError("--retrieval-pool-size must be at least --top-k")
     args.output.mkdir(parents=True, exist_ok=True)
     rows = read_csv(args.normalized_data / "keyframes.csv")
     vertices = read_csv(args.optimized_dir / "vertices.csv")
@@ -225,10 +260,24 @@ def main() -> int:
                          for (first, second), count in sorted(covisibility.items())
                          if count >= args.covisibility_min_landmarks)
     image_paths = [args.normalized_data / row["image_path"] for row in rows]
-    descriptors = salad_descriptors(
+    salad_start = time.perf_counter()
+    descriptors, salad_per_frame_ms = salad_descriptors(
         image_paths, args.device, args.salad_repo, args.salad_checkpoint,
-        args.dinov2_repo, args.dinov2_checkpoint)
+        args.dinov2_repo, args.dinov2_checkpoint, args.salad_batch_size)
+    salad_seconds = time.perf_counter() - salad_start
     np.save(args.output / "salad_descriptors.npy", descriptors)
+    covisible_neighbors: dict[int, list[int]] = defaultdict(list)
+    for (first, second), count in covisibility.items():
+        if count >= args.covisibility_min_landmarks:
+            covisible_neighbors[first].append(second)
+            covisible_neighbors[second].append(first)
+    adaptive_salad_thresholds = np.full(len(rows), args.min_salad_similarity, dtype=np.float32)
+    covisible_salad_reference = np.full(len(rows), np.nan, dtype=np.float32)
+    for frame, neighbors in covisible_neighbors.items():
+        reference = float(np.median(descriptors[frame] @ descriptors[np.asarray(neighbors)].T))
+        covisible_salad_reference[frame] = reference
+        adaptive_salad_thresholds[frame] = max(
+            args.min_salad_similarity, args.covisibility_similarity_ratio * reference)
     # Exact inner-product FAISS index: equivalent ranking for normalized SALAD
     # descriptors today, but avoids an O(N^2) Python/Numpy retrieval path as
     # recordings become much longer.
@@ -236,16 +285,56 @@ def main() -> int:
     index.add(np.ascontiguousarray(descriptors.astype(np.float32)))
     _, retrieval_indices = index.search(
         np.ascontiguousarray(descriptors.astype(np.float32)),
-        min(len(rows), args.top_k + args.temporal_exclusion_frames + 1),
+        min(len(rows), args.retrieval_pool_size + args.temporal_exclusion_frames + 1),
     )
     if hasattr(ort, "preload_dlls"):
         ort.preload_dlls()
-    session = ort.InferenceSession(str(args.lightglue_model), providers=["CUDAExecutionProvider", "CPUExecutionProvider"])
-    images = [cv2.imread(str(path), cv2.IMREAD_GRAYSCALE).astype(np.float32)[None, None] / 255.0 for path in image_paths]
-    cache: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+    providers = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+    if split_models:
+        matcher_session = ort.InferenceSession(str(args.lightglue_matcher_model), providers=providers)
+        if args.feature_cache is None:
+            extractor_session = ort.InferenceSession(str(args.superpoint_model), providers=providers)
+            sessions = (extractor_session, matcher_session)
+        else:
+            extractor_session = None
+            sessions = (matcher_session,)
+    else:
+        session = ort.InferenceSession(str(args.lightglue_model), providers=providers)
+        sessions = (session,)
+    width, height = int(rows[0]["width_px"]), int(rows[0]["height_px"])
+    # Cached split-model features already contain every local input required by
+    # LightGlue. Avoid decoding the full image sequence a second time.
+    images = None
+    if args.feature_cache is None:
+        images = [
+            cv2.imread(str(path), cv2.IMREAD_GRAYSCALE).astype(np.float32)[None, None] / 255.0
+            for path in image_paths
+        ]
+    feature_start = time.perf_counter()
+    cache: dict[int, tuple[np.ndarray, np.ndarray, np.ndarray | None]] = {}
+    if args.feature_cache is not None:
+        if not args.feature_cache.is_dir():
+            raise RuntimeError(f"missing frontend feature cache: {args.feature_cache}")
+        for frame in range(len(rows)):
+            path = args.feature_cache / f"frame_{frame:06d}.npz"
+            if not path.is_file():
+                raise RuntimeError(f"missing frontend feature cache entry: {path}")
+            with np.load(path) as stored:
+                points = stored["keypoints"].astype(np.float32)
+                features = stored["descriptors"].astype(np.float32)
+            cache[frame] = (points, keypoint_mapping(points, frame_export[frame][0]), features)
+    elif split_models:
+        assert images is not None
+        for frame, image in enumerate(images):
+            points, _, features = extractor_session.run(None, {"image": image})
+            points = points[0].astype(np.float32)
+            cache[frame] = (points, keypoint_mapping(points, frame_export[frame][0]), features[0].astype(np.float32))
+    feature_seconds = time.perf_counter() - feature_start
     rejected: list[dict[str, object]] = []
     verified: list[dict[str, object]] = []
+    per_frame_stats = [defaultdict(float) for _ in rows]
     seen_pairs: set[tuple[int, int]] = set()
+    matcher_start = time.perf_counter()
     for query in range(len(rows)):
         candidates = [int(index) for index in retrieval_indices[query] if int(index) != query]
         kept = 0
@@ -257,24 +346,45 @@ def main() -> int:
             spatial = float(np.linalg.norm(T_M_C[candidate][:3, 3] - T_M_C[query][:3, 3]))
             odom_distance = float(abs(trajectory_distance[candidate] - trajectory_distance[query]))
             base = {"query_frame": query, "candidate_frame": candidate, "salad_similarity": float(descriptors[query] @ descriptors[candidate]), "spatial_distance_m": spatial, "trajectory_distance_m": odom_distance}
+            per_frame_stats[query]["retrieved_candidates"] += 1
             if abs(candidate - query) <= args.temporal_exclusion_frames:
                 rejected.append(base | {"reason": "temporal_neighbor"})
                 continue
             if odom_distance < args.min_trajectory_separation_m:
                 rejected.append(base | {"reason": "trajectory_distance_lt_threshold"})
                 continue
+            if spatial > args.max_spatial_candidate_distance_m:
+                rejected.append(base | {"reason": "spatial_distance_gt_threshold", "max_spatial_candidate_distance_m": args.max_spatial_candidate_distance_m})
+                continue
             if covisibility.get(pair, 0) >= args.covisibility_min_landmarks:
                 rejected.append(base | {"reason": "covisibility_neighbor", "shared_landmarks": covisibility[pair]})
                 continue
-            k0, k1, matches0, _, scores0, _ = session.run(None, {"image0": images[candidate], "image1": images[query]})
-            k0, k1 = k0[0], k1[0]
-            for frame, points in ((candidate, k0), (query, k1)):
-                if frame not in cache:
-                    cache[frame] = (points, keypoint_mapping(points, frame_export[frame][0]))
-            ids0 = cache[candidate][1]
+            if base["salad_similarity"] < adaptive_salad_thresholds[query]:
+                rejected.append(base | {"reason": "salad_similarity_lt_adaptive_threshold", "adaptive_salad_threshold": float(adaptive_salad_thresholds[query]), "covisible_salad_reference": None if np.isnan(covisible_salad_reference[query]) else float(covisible_salad_reference[query])})
+                continue
+            per_frame_stats[query]["similarity_gated_candidates"] += 1
+            pnp_start = time.perf_counter()
+            if split_models:
+                k0, ids0, desc0 = cache[candidate]
+                k1, ids1, desc1 = cache[query]
+                matches0, _, scores0, _ = matcher_session.run(None, {
+                    "kpts0": normalize_keypoints(k0, width, height)[None],
+                    "kpts1": normalize_keypoints(k1, width, height)[None],
+                    "desc0": desc0[None], "desc1": desc1[None],
+                })
+            else:
+                assert images is not None
+                k0, k1, matches0, _, scores0, _ = session.run(None, {"image0": images[candidate], "image1": images[query]})
+                k0, k1 = k0[0], k1[0]
+                for frame, points in ((candidate, k0), (query, k1)):
+                    if frame not in cache:
+                        cache[frame] = (points, keypoint_mapping(points, frame_export[frame][0]), None)
+                ids0 = cache[candidate][1]
+                ids1 = cache[query][1]
+            per_frame_stats[query]["lightglue_pnp_ms"] += 1000.0 * (time.perf_counter() - pnp_start)
+            per_frame_stats[query]["lightglue_pnp_attempts"] += 1
             chosen = np.flatnonzero((matches0[0] >= 0) & (scores0[0] >= args.min_lightglue_score))
             object_points, image_points, correspondences = [], [], []
-            ids1 = cache[query][1]
             for index0 in chosen:
                 exported_index = int(ids0[index0])
                 if exported_index < 0:
@@ -290,7 +400,6 @@ def main() -> int:
             if len(object_points) < args.min_pnp_inliers:
                 rejected.append(base | {"reason": "pnp_inliers", "pnp_inliers": 0, "lightglue_matches": int(len(chosen))})
                 continue
-            height, width = images[query].shape[-2:]
             cells = {
                 (min(3, int(point[0] * 4 / width)), min(2, int(point[1] * 3 / height)))
                 for point in image_points
@@ -317,12 +426,17 @@ def main() -> int:
             T_Cq_M = transform(rotation, tvec.reshape(3))
             T_M_Cq_pnp = np.linalg.inv(T_Cq_M)
             delta = T_M_Cq_pnp @ np.linalg.inv(T_M_C[query])
+            delta_translation_m = float(np.linalg.norm(delta[:3, 3]))
+            if delta_translation_m > args.max_loop_delta_translation_m:
+                rejected.append(base | {"reason": "loop_delta_translation_gt_threshold", "delta_translation_m": delta_translation_m, "max_loop_delta_translation_m": args.max_loop_delta_translation_m, "pnp_inliers": int(count)})
+                continue
             T_from_to = np.linalg.inv(T_M_C[candidate]) @ T_M_Cq_pnp
             disagreement = np.linalg.inv(np.linalg.inv(T_M_C[candidate]) @ T_M_C[query]) @ T_from_to
-            verified.append(base | {"pnp_inliers": int(count), "median_reprojection_px": float(np.median(reprojection)), "T_from_to": T_from_to, "delta": delta, "covariance": covariance(object_array[inlier_ids], image_array[inlier_ids], rvec, tvec, camera), "odom_pnp_translation_difference_m": float(np.linalg.norm(disagreement[:3, 3])), "odom_pnp_rotation_difference_deg": angle_deg(disagreement[:3, :3]), "observations": [correspondences[int(index)] for index in inlier_ids if correspondences[int(index)]["query_keypoint_index"] >= 0]})
+            verified.append(base | {"pnp_inliers": int(count), "median_reprojection_px": float(np.median(reprojection)), "T_from_to": T_from_to, "delta": delta, "delta_translation_m": delta_translation_m, "covariance": covariance(object_array[inlier_ids], image_array[inlier_ids], rvec, tvec, camera), "odom_pnp_translation_difference_m": float(np.linalg.norm(disagreement[:3, 3])), "odom_pnp_rotation_difference_deg": angle_deg(disagreement[:3, :3]), "observations": [correspondences[int(index)] for index in inlier_ids if correspondences[int(index)]["query_keypoint_index"] >= 0]})
             kept += 1
             if kept >= args.top_k:
                 break
+    matcher_seconds = time.perf_counter() - matcher_start
     clusters: dict[tuple[int, int], list[dict[str, object]]] = defaultdict(list)
     for item in verified:
         clusters[(int(item["candidate_frame"]) // args.support_window_frames, int(item["query_frame"]) // args.support_window_frames)].append(item)
@@ -370,7 +484,24 @@ def main() -> int:
     with (args.output / "rejected_candidates.csv").open("w", newline="", encoding="utf-8") as stream:
         writer = csv.DictWriter(stream, fieldnames=fields)
         writer.writeheader(); writer.writerows([{key: value for key, value in row.items() if key in fields} for row in rejected])
-    report = {"backend": "DINOv2-SALAD + SuperPoint-LightGlue ONNX + PnP", "retrieval": "faiss_exact_inner_product", "frames": len(rows), "top_k": args.top_k, "temporal_exclusion_frames": args.temporal_exclusion_frames, "loop_nms_frames": args.loop_nms_frames, "covisibility_min_landmarks": args.covisibility_min_landmarks, "min_trajectory_separation_m": args.min_trajectory_separation_m, "min_pnp_inliers": args.min_pnp_inliers, "raw_pnp_verified": len(verified), "accepted_loops": len(accepted), "rejected": len(rejected), "lightglue_provider": session.get_providers()[0]}
+    with (args.output / "timing_per_frame.csv").open("w", newline="", encoding="utf-8") as stream:
+        fields = ("frame_index", "salad_descriptor_ms", "covisible_salad_reference",
+                  "adaptive_salad_threshold", "retrieved_candidates",
+                  "similarity_gated_candidates", "lightglue_pnp_attempts", "lightglue_pnp_ms")
+        writer = csv.DictWriter(stream, fieldnames=fields)
+        writer.writeheader()
+        for frame, stats in enumerate(per_frame_stats):
+            writer.writerow({
+                "frame_index": frame, "salad_descriptor_ms": round(salad_per_frame_ms[frame], 4),
+                "covisible_salad_reference": "" if np.isnan(covisible_salad_reference[frame]) else round(float(covisible_salad_reference[frame]), 6),
+                "adaptive_salad_threshold": round(float(adaptive_salad_thresholds[frame]), 6),
+                "retrieved_candidates": int(stats["retrieved_candidates"]),
+                "similarity_gated_candidates": int(stats["similarity_gated_candidates"]),
+                "lightglue_pnp_attempts": int(stats["lightglue_pnp_attempts"]),
+                "lightglue_pnp_ms": round(float(stats["lightglue_pnp_ms"]), 4),
+            })
+    feature_timing_name = "feature_cache_load" if args.feature_cache else "superpoint_extraction"
+    report = {"backend": "DINOv2-SALAD + SuperPoint-LightGlue ONNX + PnP", "retrieval": "faiss_exact_inner_product_adaptive_similarity_gate", "frames": len(rows), "top_k": args.top_k, "retrieval_pool_size": args.retrieval_pool_size, "covisibility_similarity_ratio": args.covisibility_similarity_ratio, "min_salad_similarity": args.min_salad_similarity, "max_loop_delta_translation_m": args.max_loop_delta_translation_m, "max_spatial_candidate_distance_m": args.max_spatial_candidate_distance_m, "temporal_exclusion_frames": args.temporal_exclusion_frames, "loop_nms_frames": args.loop_nms_frames, "covisibility_min_landmarks": args.covisibility_min_landmarks, "min_trajectory_separation_m": args.min_trajectory_separation_m, "min_pnp_inliers": args.min_pnp_inliers, "raw_pnp_verified": len(verified), "accepted_loops": len(accepted), "rejected": len(rejected), "lightglue_provider": sessions[0].get_providers()[0], "feature_cache": str(args.feature_cache) if args.feature_cache else None, "definitions": {"salad_similarity": "L2-normalized descriptor inner product (cosine similarity); larger means visually closer.", "adaptive_salad_threshold": "max(min_salad_similarity, covisibility_similarity_ratio * median SALAD similarity to the query frame's covisible neighbors).", "spatial_distance_m": "Euclidean distance between current optimized camera centers in M.", "trajectory_distance_m": "Absolute difference of accumulated optimized-camera path length along the trajectory.", "delta_translation_m": "Norm of translation of T_M_Cquery_from_PnP * inverse(T_M_Cquery_current); correction applied to the query camera pose, in meters."}, "timing_seconds": {"salad": salad_seconds, feature_timing_name: feature_seconds, "lightglue_pnp": matcher_seconds, "total": salad_seconds + feature_seconds + matcher_seconds}, "timing_per_frame_csv": "timing_per_frame.csv"}
     (args.output / "report.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(report, indent=2))
     return 0

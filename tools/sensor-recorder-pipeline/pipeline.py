@@ -494,16 +494,56 @@ def normalize_recording(context: Context) -> Dict[str, Any]:
 
     imu_start = float(paired_imu[0]["sensor_sec"])
     imu_end = float(paired_imu[-1]["sensor_sec"])
-    stride = int(config["keyframes"]["stride"])
-    if stride < 1:
-        raise PipelineError("keyframes.stride must be at least one")
+    keyframe_config = config["keyframes"]
     eligible_frames = [
         frame
         for frame in normalized_frames
         if not config["keyframes"]["require_imu_coverage"]
         or imu_start <= float(frame["sensor_sec"]) <= imu_end
     ]
-    keyframes = eligible_frames[::stride]
+    if keyframe_config.get("selection", "stride") == "pose_adaptive":
+        min_translation_m = float(keyframe_config["min_translation_m"])
+        min_rotation_deg = float(keyframe_config["min_rotation_deg"])
+        max_interval_sec = float(keyframe_config["max_interval_sec"])
+        if min_translation_m <= 0.0 or min_rotation_deg <= 0.0 or max_interval_sec <= 0.0:
+            raise PipelineError("pose-adaptive keyframe thresholds must be positive")
+        keyframes = [eligible_frames[0]] if eligible_frames else []
+        for frame_index, frame in enumerate(eligible_frames[1:], start=1):
+            anchor = keyframes[-1]
+            translation = math.dist(
+                [float(anchor[f"p_M_I_{axis}_m"]) for axis in "xyz"],
+                [float(frame[f"p_M_I_{axis}_m"]) for axis in "xyz"],
+            )
+            dot = abs(sum(
+                float(anchor[f"q_M_I_{axis}"]) * float(frame[f"q_M_I_{axis}"])
+                for axis in "wxyz"
+            ))
+            rotation_deg = math.degrees(2.0 * math.acos(min(1.0, dot)))
+            elapsed_sec = float(frame["sensor_sec"]) - float(anchor["sensor_sec"])
+            # Camera timestamps are quantized.  When the next source frame
+            # would exceed the requested maximum, retain its predecessor so
+            # that the hard IMU-integration interval bound is never crossed.
+            if elapsed_sec > max_interval_sec and eligible_frames[frame_index - 1] is not anchor:
+                keyframes.append(eligible_frames[frame_index - 1])
+                anchor = keyframes[-1]
+                translation = math.dist(
+                    [float(anchor[f"p_M_I_{axis}_m"]) for axis in "xyz"],
+                    [float(frame[f"p_M_I_{axis}_m"]) for axis in "xyz"],
+                )
+                dot = abs(sum(
+                    float(anchor[f"q_M_I_{axis}"]) * float(frame[f"q_M_I_{axis}"])
+                    for axis in "wxyz"
+                ))
+                rotation_deg = math.degrees(2.0 * math.acos(min(1.0, dot)))
+                elapsed_sec = float(frame["sensor_sec"]) - float(anchor["sensor_sec"])
+            if (translation >= min_translation_m or rotation_deg >= min_rotation_deg
+                    or elapsed_sec >= max_interval_sec):
+                keyframes.append(frame)
+    else:
+        stride = int(keyframe_config["stride"])
+        if stride < 1:
+            raise PipelineError("keyframes.stride must be at least one")
+        keyframes = eligible_frames[::stride]
     if eligible_frames and keyframes[-1] is not eligible_frames[-1]:
         keyframes.append(eligible_frames[-1])
     if len(keyframes) < 2:

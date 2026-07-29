@@ -8,7 +8,8 @@ run_visual_ba=0
 runtime_root="${MAPLAB_RUNTIME_ROOT:-/root/autodl-tmp/maplab-focal}"
 runtime_workspace="${MAPLAB_RUNTIME_WORKSPACE:-/workspace}"
 salad_python="${SALAD_PYTHON:-/root/miniconda3/bin/python}"
-lightglue_model="${LIGHTGLUE_ONNX_MODEL:-/root/autodl-tmp/third_party/LightGlue-ONNX-v1/weights/superpoint_2048_lightglue_end2end.onnx}"
+superpoint_model="${SUPERPOINT_ONNX_MODEL:-/root/autodl-tmp/third_party/LightGlue-ONNX-v1/weights/superpoint_2048.onnx}"
+lightglue_matcher_model="${LIGHTGLUE_MATCHER_ONNX_MODEL:-/root/autodl-tmp/third_party/LightGlue-ONNX-v1/weights/superpoint_lightglue.onnx}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -20,10 +21,10 @@ while [[ $# -gt 0 ]]; do
 done
 [[ -n "$result" ]] || { echo "--output is required" >&2; exit 2; }
 result="$(realpath "$result")"
-source_stage="$result/maps/04_visual_ba_intrinsics"
+source_stage="$result/maps/04_initial_vi_ba_intrinsics"
 source_map="$source_stage/vi_map"
 [[ -d "$source_map" ]] || { echo "missing $source_map" >&2; exit 2; }
-[[ -x "$salad_python" && -f "$lightglue_model" ]] || { echo "SALAD or LightGlue runtime missing" >&2; exit 2; }
+[[ -x "$salad_python" && -f "$superpoint_model" && -f "$lightglue_matcher_model" ]] || { echo "SALAD or split ONNX runtime missing" >&2; exit 2; }
 command -v proot >/dev/null || { echo "proot is required" >&2; exit 2; }
 
 loops="$result/loops/salad_lightglue_pnp"
@@ -48,7 +49,10 @@ TORCH_HOME="${TORCH_HOME:-/root/autodl-tmp/torch-hub}" \
   "$salad_python" "$repo_dir/tools/sensor-recorder-loop-closure/salad_lightglue_loop_closure.py" \
   --normalized-data "$result/normalized" --optimized-dir "$loops/source_export" \
   --optimized-report "$source_stage/report.json" \
-  --output "$loops" --lightglue-model "$lightglue_model"
+  --output "$loops" --superpoint-model "$superpoint_model" \
+  --lightglue-matcher-model "$lightglue_matcher_model" \
+  --feature-cache "$result/features/superpoint_lightglue/feature_cache" \
+  --salad-batch-size 16
 
 if [[ ! -s "$loops/verified_loops.yaml" || "$(grep -c 'camera_from:' "$loops/verified_loops.yaml" || true)" -eq 0 ]]; then
   echo "No verified loops; wrote diagnostics to $loops and skipped optimization."
@@ -78,7 +82,10 @@ fi
 run_native "$runtime_workspace/devel/lib/sensor_recorder_importer/sensor_recorder_brisk_ba" \
   --map="$stage08/vi_map" --report="$stage08/report.json" --run_frontend=false --run_ba=true \
   --use_imu=true --optimize_biases=true --optimize_velocity=true --optimize_intrinsics=false \
-  --optimize_extrinsics=false --ba_feature_type=SuperPoint --ba_iterations=50 --prune_bad_landmarks=true
+  --optimize_extrinsics=false --ba_feature_type=SuperPoint --ba_iterations=50 \
+  --ba_outlier_rejection_use_reprojection_error=true \
+  --ba_outlier_rejection_max_reprojection_error_px=5.0 \
+  --ba_outlier_rejection_reject_every_n_iters=3 --prune_bad_landmarks=true
 
 for stage in "$stage06" "$stage08"; do
   run_native "$runtime_workspace/devel/lib/sensor_recorder_importer/sensor_recorder_vimap_export" \
