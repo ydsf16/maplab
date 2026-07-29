@@ -40,6 +40,27 @@ def load_csv(path: Path) -> list[dict[str, str]]:
         return list(csv.DictReader(stream))
 
 
+def load_tum_poses(path: Path | None) -> np.ndarray:
+    if path is None:
+        return np.empty((0, 8), dtype=np.float64)
+    rows = []
+    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        fields = line.split()
+        if not fields or fields[0].startswith("#"):
+            continue
+        if len(fields) != 8:
+            raise ValueError(f"expected 8 TUM fields in {path}:{line_number}")
+        rows.append([float(value) for value in fields])
+    if not rows:
+        raise ValueError(f"no poses found in {path}")
+    poses = np.asarray(rows, dtype=np.float64)
+    if not np.all(np.diff(poses[:, 0]) > 0.0):
+        raise ValueError(f"timestamps are not strictly increasing in {path}")
+    if not np.allclose(np.linalg.norm(poses[:, 4:], axis=1), 1.0, atol=1e-5):
+        raise ValueError(f"non-unit quaternion in {path}")
+    return poses
+
+
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Export an imported VI-Map to Rerun.")
     parser.add_argument("--keyframes", required=True, type=Path)
@@ -71,6 +92,8 @@ def parse_arguments() -> argparse.Namespace:
         "--pairs-csv", type=Path,
         help="Frontend pair graph with sequential and pose-gated covisibility edges.",
     )
+    parser.add_argument("--imu-poses-tum", type=Path)
+    parser.add_argument("--image-poses-tum", type=Path)
     return parser.parse_args()
 
 
@@ -291,6 +314,8 @@ def main() -> None:
         load_pgo_decisions(args.pgo_decisions_yaml, vertex_timestamps)
     )
     covisibility_pairs = load_covisibility_pairs(args.pairs_csv, len(rows))
+    imu_poses_tum = load_tum_poses(args.imu_poses_tum)
+    image_poses_tum = load_tum_poses(args.image_poses_tum)
 
     edge_segments = np.stack([positions[:-1], positions[1:]], axis=1)
     initial_edge_segments = np.stack(
@@ -322,7 +347,7 @@ def main() -> None:
             pair_match_counts, candidate_loop_indices, accepted_loop_indices,
             rejected_loop_indices, accepted_loop_records, rejected_loop_records,
             covisibility_pairs,
-            r_imu_camera, t_imu_camera, images,
+            r_imu_camera, t_imu_camera, imu_poses_tum, image_poses_tum, images,
         )
     else:
         with tempfile.TemporaryDirectory(prefix="vimap-rerun-images-") as temp_dir:
@@ -335,7 +360,7 @@ def main() -> None:
                 pair_match_counts, candidate_loop_indices, accepted_loop_indices,
                 rejected_loop_indices, accepted_loop_records, rejected_loop_records,
                 covisibility_pairs,
-                r_imu_camera, t_imu_camera, images,
+                r_imu_camera, t_imu_camera, imu_poses_tum, image_poses_tum, images,
             )
 
     print(
@@ -370,6 +395,8 @@ def write_rerun(
     covisibility_pairs: dict[str, list[tuple[int, int, int]]],
     r_imu_camera: np.ndarray,
     t_imu_camera: np.ndarray,
+    imu_poses_tum: np.ndarray,
+    image_poses_tum: np.ndarray,
     images: list[Path],
 ) -> None:
     rr.init("sensor_recorder_vimap", spawn=False)
@@ -450,6 +477,26 @@ def write_rerun(
         ),
         static=True,
     )
+    for path, poses, color in (
+        ("world/dense_trajectory/imu", imu_poses_tum, [255, 180, 45]),
+        ("world/dense_trajectory/camera", image_poses_tum, [70, 235, 130]),
+    ):
+        if len(poses) < 2:
+            continue
+        rr.log(
+            path,
+            rr.LineStrips3D(poses[:, 1:4], colors=color, radii=0.0025),
+            static=True,
+        )
+        rr.log(
+            f"{path}/endpoints",
+            rr.Points3D(
+                poses[[0, -1], 1:4], colors=color,
+                radii=rr.Radius.ui_points(5.0), labels=["start", "end"],
+                show_labels=True,
+            ),
+            static=True,
+        )
     if len(landmarks):
         rr.log(
             "world/landmarks",
@@ -496,6 +543,8 @@ def write_rerun(
                     f"PGO rejected loop edges: {len(rejected_loop_indices)}",
                     f"sequential covisibility edges: {len(covisibility_pairs['sequential'])}",
                     f"pose-gated covisibility edges: {len(covisibility_pairs['pose_gated'])}",
+                    f"dense IMU poses (T_M_I): {len(imu_poses_tum)}",
+                    f"dense image poses (T_M_C): {len(image_poses_tum)}",
                     "PGO gate: switch >= 0.8, Mahalanobis^2 <= 12.59",
                     "landmark color: robust Z height (purple low, yellow high)",
                     "pose: T_M_I, meters",

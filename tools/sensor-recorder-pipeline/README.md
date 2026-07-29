@@ -1,172 +1,124 @@
-# Sensor Recorder pipeline
+# Sensor Recorder Pro → Maplab 离线后处理
 
-Stable command-line entry point for importing Sensor Recorder Pro sessions into
-maplab. Raw recordings are treated as immutable inputs.
+该流水线把 Sensor Recorder Pro 的 ARKit 图像、Pose 与原始 IMU 转为
+VI-Map，并完成学习型局部特征、单轨迹 VI-BA、安全回环、最终 VI-BA、
+TUM Pose 与 Rerun 可视化。原始录制目录保持只读。
 
-```bash
-bash process.sh single \
-  --data ~/data/recorder/SR_2026-07-21_12-41-05 \
-  --output ~/data/maplab_results/SR_2026-07-21_12-41-05
-```
-
-The pipeline provides four stages:
-
-1. `validate`: validates the recording contract and writes a report.
-2. `normalize`: converts timestamps, poses and raw IMU into a versioned,
-   maplab-oriented interchange format.
-3. `create_vimap`: invokes the native `sensor_recorder_to_vimap` executable.
-4. `export_rerun`: writes and verifies a Rerun recording containing the
-   trajectory, camera model, velocity, VIWLS graph and keyframe images.
-
-`create_vimap` requires `ffmpeg`. It decodes the video frames selected by
-`frame_index` and stores one grayscale `kRawImage` resource on every VI-Map
-vertex. Each VIWLS edge contains the original IMU samples inside its time
-interval and linearly interpolated measurements at both vertex timestamps.
-The iPhone accelerometer samples are negated during normalization because
-maplab expects specific force, while Sensor Recorder reports the gravity
-direction at rest.
-
-The initial vertex velocity is derived from the ARKit position trajectory.
-Gyroscope and accelerometer biases are initialized to zero and are intended to
-be estimated during visual-inertial optimization.
-
-The default command produces both `maps/00_imported/vi_map` and
-`rerun/<recording-name>_vimap.rrd`. Install `rerun-sdk==0.33.0` in the Python
-environment used by `process.sh`, or select another interpreter with
-`RERUN_PYTHON`.
-
-Use `--to normalize` when the native maplab executable has not been built yet.
-Each completed stage has a fingerprint and is skipped on an unchanged rerun.
-
-Build the native target in a configured maplab catkin workspace with:
+## 一键处理
 
 ```bash
-catkin build sensor_recorder_importer
+bash process.sh full \
+  --data /root/data/recorder/SR_2026-07-29_00-10-03 \
+  --output /root/data/maplab_results/SR_2026-07-29_00-10-03_full \
+  --force
 ```
 
-Run the tunable ORB/BRISK frontend and triangulation without BA with:
+默认配置为 `configs/iphone_arkit_640.json`。图像缩放到 640×480，内参按
+相同比例缩放；关键帧按 0.25 m、10° 或最长 1 s 自适应选择。因此任意相邻
+关键帧间都可通过 IMU 积分恢复密集位姿。
+
+`full` 结束后写入 `pipeline_timing.tsv`，包含导入、前端与初始 VI-BA、
+回环/PGO/最终 VI-BA、Pose/Rerun 导出的壁钟时间。
+
+## 流程与产物
+
+| 阶段 | 工作 | 主要产物 |
+|---|---|---|
+| `00_imported` | 归一化 ARKit Pose、原始 ACC/Gyro，创建 VI-Map 与 VIWLS 边 | `normalized/`、`maps/00_imported/vi_map` |
+| 前端 | SuperPoint 提点、LightGlue 匹配、Essential Matrix RANSAC、多帧 track | `features/superpoint_lightglue/` |
+| `04_initial_vi_ba_intrinsics` | 初始 VI-BA，优化位姿、速度、bias、内参与外参 | 初始优化 VI-Map、Rerun |
+| Loop/PGO | SALAD 检索、LightGlue + PnP、switchable PoseGraph | `loops/salad_lightglue_pnp/`、`06_posegraph...` |
+| `08_visual_inertial_ba_loops_preview` | 仅融合 PGO 接受回环的 2D–3D 观测后进行最终 VI-BA | 最终优化 VI-Map、Rerun |
+| Pose export | Maplab RK4 IMU 积分与相机外参变换 | `poses/`、密集轨迹 Rerun |
+
+## 坐标、时间与 IMU
+
+- 优化状态使用 `T_M_I`：IMU 在 Map 坐标系中的位姿。
+- 相机轨迹使用 `T_M_C = T_M_I · inverse(T_C_I)`。
+- TUM 四元数顺序为 `qx qy qz qw`；时间是录制起点相对秒。
+- VIWLS 保存每个关键帧区间内的原始 IMU 样本，并在关键帧边界插入线性插值
+  的 IMU 测量。
+- 归一化阶段将 iPhone ACC 转为 Maplab 需要的 specific force；Gyro 保持
+  角速度单位 `rad/s`。加速度符号问题的实验应通过阶段报告与 Rerun 独立比较。
+
+## 学习型视觉前端
+
+使用分离 ONNX 模型：`superpoint_2048.onnx` 与 `superpoint_lightglue.onnx`。
+
+- 每帧最多 2,048 个 SuperPoint 特征，并持久化到 `feature_cache/`。
+- 匹配集合包括滑动窗口（间隔 1–3）与 ARKit Pose 门控的非相邻帧对；配对去重。
+- 默认 4 个独立 LightGlue 会话并行执行，随后使用 OpenCV
+  `findEssentialMat(..., RANSAC)` 做 2D–2D 几何验证。
+- Essential RANSAC：1 px、置信度 0.995、最多 500 次迭代；至少 15 个内点
+  才写入 track。
+- `pairs.csv` 记录每个帧对的 LightGlue、Essential RANSAC 与总耗时；
+  `timing_per_frame.csv` 汇总单帧耗时。
+
+## 安全回环与观测融合
+
+回环前端独立于 Maplab 的二进制词袋：
+
+1. 在 `04_initial_vi_ba_intrinsics` 构建共视图。共享至少 20 个有效 Landmark
+   的候选直接跳过，无需 LightGlue/PnP。
+2. SALAD 对其余帧检索 Top-10。候选必须超过按共视邻居相似度计算的自适应阈值。
+3. 排除时间邻居、累计轨迹距离小于 0.5 m、当前空间距离超过 10 m 的候选。
+4. LightGlue 匹配后使用 OpenCV `solvePnPRansac`（3 px、2,000 次、0.999，至少
+   20 内点），并要求网格覆盖与多帧支持。
+5. PGO 中每条边使用 switchable SE(3) 约束；仅 `switch ≥ 0.8` 且
+   `Mahalanobis² ≤ 12.59` 的边进入观测融合。
+6. 最终 BA 不保留 Loop 的 SE(3) 边。它只消费 PGO 接受回环中的 PnP 2D–3D
+   内点：合并对应 Landmark 或增加观测，重新三角化受影响 track 后进行 VI-BA。
+
+关键诊断文件：
+
+- `verified_loops.yaml`：PnP 通过的候选。
+- `accepted_loops_after_pgo.yaml`：唯一允许进入 Landmark 融合的回环。
+- `rejected_candidates.csv`：共视、轨迹、检索、PnP、PGO 等拒绝原因。
+- `loop_report.json`：检索门限、距离定义、回环耗时与计数。
+
+## 导出 TUM Pose 与 Rerun
 
 ```bash
-sensor_recorder_brisk_ba \
-  --map=/path/to/vi_map \
-  --report=/path/to/report.json \
-  --run_frontend=true \
-  --run_ba=false \
-  --frontend_fast_threshold=5 \
-  --frontend_pyramid_levels=4 \
-  --frontend_nms_radius=4 \
-  --frontend_max_features=1000
+bash process.sh export-poses \
+  --output /root/data/maplab_results/SR_2026-07-29_00-10-03_full
 ```
 
-For 1920x1440 iPhone frames, the validated 10 Hz frontend profile is:
+`--stage auto` 默认使用最终 `08` VI-BA；无有效回环时回退到 `04`。也可显式选择
+`--stage initial` 或 `--stage final`。
+
+输出：
+
+- `poses/imu_poses_tum.txt`：每个 VIWLS IMU 时间戳的 `T_M_I`。
+- `poses/image_poses_tum.txt`：每个处于 IMU 覆盖范围的图像时间戳的 `T_M_C`。
+- `poses/pose_export_report.txt`：数量、覆盖范围与越界图像帧计数。
+- `rerun/<recording>_dense_poses.rrd`：橙色高频 IMU 轨迹与绿色图像相机轨迹。
+
+两份 TUM 文件都是：
+
+```text
+timestamp tx ty tz qx qy qz qw
+```
+
+## 运行环境
+
+用户接口不需要启动 ROS。包装脚本在 AutoDL 的 Ubuntu 20.04 / ROS Noetic
+proot 中调用原生 Maplab 工具。可通过以下环境变量覆盖路径：
+
+```text
+MAPLAB_RUNTIME_ROOT
+MAPLAB_RUNTIME_WORKSPACE
+LIGHTGLUE_PYTHON
+SALAD_PYTHON
+RERUN_PYTHON
+```
+
+模型和权重不提交进 Git。默认路径位于
+`/root/autodl-tmp/third_party/LightGlue-ONNX-v1/weights/` 与
+`/root/autodl-tmp/third_party/{salad,dinov2}`。
+
+在 Mac 上可用 evo 快速检查 TUM 轨迹：
 
 ```bash
-sensor_recorder_brisk_ba \
-  --map=/path/to/vi_map \
-  --report=/path/to/report.json \
-  --run_frontend=true \
-  --run_ba=false \
-  --frontend_fast_threshold=5 \
-  --frontend_pyramid_levels=4 \
-  --frontend_nms_radius=2 \
-  --frontend_max_features=2000 \
-  --feature_tracking_detector_orb_num_features=4000 \
-  --gyro_matcher_small_search_distance_px=30 \
-  --gyro_matcher_large_search_distance_px=60 \
-  --gyro_lk_candidate_ratio=0.8 \
-  --gyro_lk_max_pyramid_levels=3 \
-  --gyro_lk_window_size=31
+evo_traj tum poses/image_poses_tum.txt -p
+evo_traj tum poses/imu_poses_tum.txt -p
 ```
-
-The BRISK matching-bit thresholds and Lowe ratio are also runtime flags:
-`--gyro_matcher_matching_bits_ratio_relaxed`,
-`--gyro_matcher_matching_bits_ratio_strict`, and
-`--gyro_matcher_lowe_ratio`.
-
-The frontend report contains every frame's detected keypoint count and every
-adjacent frame pair's RANSAC inlier/outlier counts. When this report is passed
-to `export_vimap_rerun.py`, the same values are available as Rerun scalar
-timelines and all detected keypoints are overlaid on the keyframe images.
-Rejected landmarks are omitted from the default 3D view; pass
-`--include-bad-landmarks` for a dedicated debugging export.
-
-`configs/iphone_arkit_dense.json` imports every IMU-covered camera frame as a
-VI-Map vertex. Use it when validating the built-in adjacent-frame tracker; the
-default configuration keeps every third frame for the normal keyframe map.
-
-`sensor_recorder_vimap_export` writes optimized poses, landmarks and 2D
-keypoints for `export_vimap_rerun.py`. The Rerun recording then contains both
-the initial trajectory and the optimized VI-Map trajectory. When calibration
-is enabled, the report and Rerun export use the optimized intrinsics and
-camera-IMU transform rather than the initial configuration values.
-
-The default configuration is `configs/iphone_arkit.json`. It records all frame
-conventions explicitly. Initial camera-to-IMU translation is zero; the initial
-rotation matches Landscape Right capture and is intended to be refined later.
-
-## SuperPoint + LightGlue ONNX frontend
-
-Use `configs/iphone_arkit_640.json` to resize the keyframe images to 640x480.
-The importer scales `fx`, `fy`, `cx`, and `cy` by the same factors and keeps the
-raw recording unchanged.
-
-The validated frontend uses the fixed-size
-`superpoint_2048_lightglue_end2end.onnx` model from LightGlue-ONNX. The model is
-a runtime dependency and is not committed to this repository. Install
-`onnxruntime-gpu[cuda,cudnn]==1.23.2`, `numpy`, and
-`opencv-python-headless`, then set `LIGHTGLUE_ONNX_MODEL` if the model is stored
-outside the default AutoDL path.
-
-```bash
-bash process.sh single \
-  --data /root/data/recorder/SR_2026-07-22_22-24-31 \
-  --output /root/data/maplab_results/SR_2026-07-22_22-24-31 \
-  --config configs/iphone_arkit_640.json \
-  --to create_vimap
-
-bash process.sh superpoint-lightglue \
-  --output /root/data/maplab_results/SR_2026-07-22_22-24-31
-
-# Optional Visual-only BA with 3 px iterative outlier rejection.
-bash process.sh superpoint-lightglue \
-  --output /root/data/maplab_results/SR_2026-07-22_22-24-31 \
-  --visual-ba
-```
-
-The ONNX frontend matches keyframes at offsets 1, 2, and 3, filters matches
-with Essential Matrix RANSAC, creates conflict-free multi-frame tracks, imports
-them as `kSuperPoint` observations, triangulates without BA, and automatically
-exports a verified Rerun recording. The current VI-Map stores a one-byte
-placeholder descriptor per keypoint because subsequent matching remains in the
-external ONNX frontend; keypoints, scores, and track IDs are stored normally.
-The default match-score threshold is 0.15 and the Essential Matrix RANSAC
-threshold is 1.0 pixel at 640x480.
-
-On AutoDL, the default wrapper runs the native importer inside the isolated
-Ubuntu 20.04/ROS Noetic runtime. Its paths can be overridden with
-`MAPLAB_RUNTIME_ROOT`, `MAPLAB_RUNTIME_WORKSPACE`, and
-`MAPLAB_IMPORTER_BINARY`. The user-facing process does not start ROS.
-
-## Learning-based loop closure
-
-Run it after `04_visual_ba_intrinsics` exists:
-
-```bash
-bash process.sh loop-closure --output /root/data/maplab_results/SR_2026-07-22_22-24-31_sp_lg
-```
-
-DINOv2-SALAD retrieves the top 20 candidates. SuperPoint-LightGlue ONNX and
-2D-3D PnP verify them. Temporal neighbours and pairs separated by less than 0.5 m
-along the current visual-odometry trajectory are rejected before local matching.
-A loop needs at least 20 PnP inliers,
-3 px RANSAC, grid coverage, and two consistent pairs in a temporal cluster.
-
-The frontend writes `loops/salad_lightglue_pnp/verified_loops.yaml` and full
-reject diagnostics without modifying stages 00--05. Verified loops produce
-`06_posegraph_salad_lightglue`, `07_global_visual_ba_loops`, and
-`08_visual_inertial_ba_loops_preview`. The last result remains a preview while
-the accelerometer sign is unresolved.
-
-SALAD uses local source and two external weight files so AutoDL needs no GitHub
-access at runtime. Defaults are `/root/autodl-tmp/third_party/{salad,dinov2}`
-with `dino_salad.ckpt` and `dinov2_vitb14_pretrain.pth`; weights stay out of Git.

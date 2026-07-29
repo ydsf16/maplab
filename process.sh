@@ -44,10 +44,13 @@ EOF
   "${repo_dir}/tools/sensor-recorder-features/run_superpoint_lightglue.sh" "${stage_args[@]}" --initial-vi-ba
   frontend_vi_ba_end="$(date +%s)"
   "${repo_dir}/tools/sensor-recorder-loop-closure/run_loop_closure.sh" "${stage_args[@]}"
+  loop_end="$(date +%s)"
+  "${repo_dir}/tools/sensor-recorder-pipeline/run_pose_export.sh" --output "${output}"
   full_end="$(date +%s)"
-  printf 'stage\twall_seconds\nimport\t%s\nfrontend_and_initial_vi_ba\t%s\nloop_pgo_fusion_and_final_vi_ba\t%s\ntotal\t%s\n' \
+  printf 'stage\twall_seconds\nimport\t%s\nfrontend_and_initial_vi_ba\t%s\nloop_pgo_fusion_and_final_vi_ba\t%s\npose_export\t%s\ntotal\t%s\n' \
     "$((import_end - full_start))" "$((frontend_vi_ba_end - import_end))" \
-    "$((full_end - frontend_vi_ba_end))" "$((full_end - full_start))" > "${pipeline_timing_file}"
+    "$((loop_end - frontend_vi_ba_end))" "$((full_end - loop_end))" \
+    "$((full_end - full_start))" > "${pipeline_timing_file}"
   echo "created ${pipeline_timing_file}"
   exit 0
 fi
@@ -60,6 +63,11 @@ fi
 if [[ "${1:-}" == "loop-closure" ]]; then
   shift
   exec "${repo_dir}/tools/sensor-recorder-loop-closure/run_loop_closure.sh" "$@"
+fi
+
+if [[ "${1:-}" == "export-poses" ]]; then
+  shift
+  exec "${repo_dir}/tools/sensor-recorder-pipeline/run_pose_export.sh" "$@"
 fi
 
 if ! command -v "${python_bin}" >/dev/null 2>&1; then
