@@ -13,6 +13,8 @@ cs_add_executable(sensor_recorder_brisk_ba
                   src/sensor-recorder-brisk-ba.cc)
 cs_add_executable(sensor_recorder_vimap_export
                   src/sensor-recorder-vimap-export.cc)
+cs_add_executable(sensor_recorder_pose_export
+                  src/sensor-recorder-pose-export.cc)
 cs_add_executable(sensor_recorder_posegraph_relax
                   src/sensor-recorder-posegraph-relax.cc)
 cs_add_executable(sensor_recorder_loop_observations
