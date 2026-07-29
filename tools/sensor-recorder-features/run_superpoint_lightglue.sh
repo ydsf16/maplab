@@ -3,38 +3,50 @@ set -euo pipefail
 
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 result=""
-model="${LIGHTGLUE_ONNX_MODEL:-/root/autodl-tmp/third_party/LightGlue-ONNX-v1/weights/superpoint_2048_lightglue_end2end.onnx}"
+extractor_model="${SUPERPOINT_ONNX_MODEL:-/root/autodl-tmp/third_party/LightGlue-ONNX-v1/weights/superpoint_2048.onnx}"
+matcher_model="${LIGHTGLUE_MATCHER_ONNX_MODEL:-/root/autodl-tmp/third_party/LightGlue-ONNX-v1/weights/superpoint_lightglue.onnx}"
 onnx_python="${LIGHTGLUE_PYTHON:-/root/autodl-tmp/venvs/lightglue/bin/python}"
 runtime_root="${MAPLAB_RUNTIME_ROOT:-/root/autodl-tmp/maplab-focal}"
 runtime_workspace="${MAPLAB_RUNTIME_WORKSPACE:-/workspace}"
 max_pair_gap=3
+matcher_workers="${LIGHTGLUE_MATCHER_WORKERS:-4}"
 force=0
 visual_ba=0
+initial_vi_ba=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --output) result="$2"; shift 2 ;;
-    --model) model="$2"; shift 2 ;;
+    --extractor-model) extractor_model="$2"; shift 2 ;;
+    --matcher-model) matcher_model="$2"; shift 2 ;;
     --python) onnx_python="$2"; shift 2 ;;
     --max-pair-gap) max_pair_gap="$2"; shift 2 ;;
+    --matcher-workers) matcher_workers="$2"; shift 2 ;;
     --visual-ba) visual_ba=1; shift ;;
+    --initial-vi-ba) initial_vi_ba=1; shift ;;
     --force) force=1; shift ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
 
 [[ -n "${result}" ]] || { echo "--output is required" >&2; exit 2; }
+if [[ "${visual_ba}" -eq 1 && "${initial_vi_ba}" -eq 1 ]]; then
+  echo "choose at most one of --visual-ba and --initial-vi-ba" >&2; exit 2
+fi
 result="$(realpath "${result}")"
 [[ -d "${result}/maps/00_imported/vi_map" ]] || {
   echo "missing imported VI-Map: ${result}/maps/00_imported/vi_map" >&2
   exit 2
 }
-[[ -f "${model}" ]] || { echo "missing ONNX model: ${model}" >&2; exit 2; }
+[[ -f "${extractor_model}" && -f "${matcher_model}" ]] || { echo "missing split SuperPoint or LightGlue ONNX model" >&2; exit 2; }
 [[ -x "${onnx_python}" ]] || { echo "missing Python runtime: ${onnx_python}" >&2; exit 2; }
 command -v proot >/dev/null || { echo "proot is required" >&2; exit 2; }
 
 features="${result}/features/superpoint_lightglue"
-if [[ "${visual_ba}" -eq 1 ]]; then
+if [[ "${initial_vi_ba}" -eq 1 ]]; then
+  stage="${result}/maps/04_initial_vi_ba_intrinsics"
+  rrd="${result}/rerun/$(basename "${result}")_initial_vi_ba_intrinsics.rrd"
+elif [[ "${visual_ba}" -eq 1 ]]; then
   stage="${result}/maps/02_superpoint_lightglue_visual_ba"
   rrd="${result}/rerun/$(basename "${result}")_superpoint_lightglue_visual_ba.rrd"
 else
@@ -52,9 +64,11 @@ mkdir -p "${features}" "${stage}" "$(dirname "${rrd}")"
 
 "${onnx_python}" "${repo_dir}/tools/sensor-recorder-features/superpoint_lightglue_onnx.py" \
   --normalized-data "${result}/normalized" \
-  --model "${model}" \
+  --extractor-model "${extractor_model}" \
+  --matcher-model "${matcher_model}" \
   --output "${features}" \
   --max-pair-gap "${max_pair_gap}" \
+  --matcher-workers "${matcher_workers}" \
   --provider cuda
 
 cp -a "${result}/maps/00_imported/vi_map" "${stage}/vi_map"
@@ -65,7 +79,16 @@ if [[ "${visual_ba}" -eq 1 ]]; then
     --optimize_velocity=false --optimize_extrinsics=false
     --ba_iterations=30 --ba_feature_type=SuperPoint
     --ba_outlier_rejection_use_reprojection_error=true
-    --ba_outlier_rejection_max_reprojection_error_px=3.0
+    --ba_outlier_rejection_max_reprojection_error_px=5.0
+    --ba_outlier_rejection_reject_every_n_iters=3
+  )
+elif [[ "${initial_vi_ba}" -eq 1 ]]; then
+  ba_arguments=(
+    --run_ba=true --use_imu=true --optimize_biases=true
+    --optimize_velocity=true --optimize_intrinsics=true --optimize_extrinsics=true
+    --ba_iterations=50 --ba_feature_type=SuperPoint
+    --ba_outlier_rejection_use_reprojection_error=true
+    --ba_outlier_rejection_max_reprojection_error_px=5.0
     --ba_outlier_rejection_reject_every_n_iters=3
   )
 fi

@@ -5,7 +5,10 @@
     "format_versions": [1]
   },
   "keyframes": {
-    "stride": 3,
+    "selection": "pose_adaptive",
+    "min_translation_m": 0.25,
+    "min_rotation_deg": 10.0,
+    "max_interval_sec": 1.0,
     "require_imu_coverage": true
   },
   "timestamp": {

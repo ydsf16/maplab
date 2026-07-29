@@ -7,8 +7,11 @@ import argparse
 import csv
 import json
 import math
+import time
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from queue import Queue
 
 import cv2
 import numpy as np
@@ -50,7 +53,9 @@ class UnionFind:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--normalized-data", required=True, type=Path)
-    parser.add_argument("--model", required=True, type=Path)
+    parser.add_argument("--model", type=Path, help="Legacy fused SuperPoint+LightGlue ONNX model.")
+    parser.add_argument("--extractor-model", type=Path, help="Split SuperPoint ONNX model.")
+    parser.add_argument("--matcher-model", type=Path, help="Split LightGlue ONNX model.")
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--max-pair-gap", type=int, default=3)
     parser.add_argument("--pose-gated-min-distance-m", type=float, default=0.15)
@@ -63,8 +68,18 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--min-match-score", type=float, default=0.15)
     parser.add_argument("--ransac-threshold-px", type=float, default=1.0)
+    parser.add_argument(
+        "--ransac-confidence", type=float, default=0.995,
+        help="OpenCV Essential-matrix RANSAC confidence.",
+    )
+    parser.add_argument(
+        "--ransac-max-iters", type=int, default=500,
+        help="Maximum OpenCV Essential-matrix RANSAC iterations per frame pair.",
+    )
     parser.add_argument("--min-pair-inliers", type=int, default=15)
     parser.add_argument("--provider", choices=("cuda", "cpu"), default="cuda")
+    parser.add_argument("--matcher-workers", type=int, default=1,
+                        help="Independent LightGlue CUDA sessions and CPU RANSAC workers.")
     return parser.parse_args()
 
 
@@ -87,12 +102,20 @@ def load_gray(path: Path, width: int, height: int) -> np.ndarray:
     return (image.astype(np.float32) / 255.0)[None, None]
 
 
+def normalize_keypoints(points: np.ndarray, width: int, height: int) -> np.ndarray:
+    """LightGlue's split ONNX input convention, independent per image size."""
+    size = np.array([width, height], dtype=np.float32)
+    return ((points - size / 2.0) / (max(width, height) / 2.0)).astype(np.float32)
+
+
 def geometric_inliers(
     points0: np.ndarray,
     points1: np.ndarray,
     row0: dict[str, str],
     row1: dict[str, str],
     threshold_px: float,
+    confidence: float,
+    max_iters: int,
 ) -> np.ndarray:
     if len(points0) < 8:
         return np.zeros(len(points0), dtype=bool)
@@ -111,7 +134,8 @@ def geometric_inliers(
     focal = 0.25 * (k0[0, 0] + k0[1, 1] + k1[0, 0] + k1[1, 1])
     _, mask = cv2.findEssentialMat(
         normalized0, normalized1, focal=1.0, pp=(0.0, 0.0),
-        method=cv2.RANSAC, prob=0.999, threshold=threshold_px / focal,
+        method=cv2.RANSAC, prob=confidence, threshold=threshold_px / focal,
+        maxIters=max_iters,
     )
     return np.zeros(len(points0), dtype=bool) if mask is None else mask.reshape(-1).astype(bool)
 
@@ -179,6 +203,11 @@ def pose_gated_pairs(
 
 def main() -> int:
     args = parse_args()
+    split_models = args.extractor_model is not None or args.matcher_model is not None
+    if split_models and (args.extractor_model is None or args.matcher_model is None):
+        raise RuntimeError("--extractor-model and --matcher-model must be supplied together")
+    if not split_models and args.model is None:
+        raise RuntimeError("supply --model or both split ONNX model paths")
     rows = read_rows(args.normalized_data / "keyframes.csv")
     width, height = int(rows[0]["width_px"]), int(rows[0]["height_px"])
     if (width, height) != (640, 480):
@@ -190,6 +219,8 @@ def main() -> int:
         raise RuntimeError("invalid pose-gated distance range")
     if args.pose_gated_max_rotation_deg <= 0.0 or args.pose_gated_max_pairs_per_frame < 0:
         raise RuntimeError("invalid pose-gated matching settings")
+    if args.matcher_workers < 1:
+        raise RuntimeError("--matcher-workers must be positive")
 
     if hasattr(ort, "preload_dlls"):
         ort.preload_dlls()
@@ -197,26 +228,68 @@ def main() -> int:
     if args.provider == "cuda" and "CUDAExecutionProvider" not in available:
         raise RuntimeError(f"CUDAExecutionProvider unavailable: {available}")
     requested = ["CUDAExecutionProvider", "CPUExecutionProvider"] if args.provider == "cuda" else ["CPUExecutionProvider"]
-    session = ort.InferenceSession(str(args.model), providers=requested)
-    if args.provider == "cuda" and session.get_providers()[0] != "CUDAExecutionProvider":
-        raise RuntimeError(f"CUDA provider failed to activate: {session.get_providers()}")
+    if split_models:
+        extractor_session = ort.InferenceSession(str(args.extractor_model), providers=requested)
+        matcher_sessions = [
+            ort.InferenceSession(str(args.matcher_model), providers=requested)
+            for _ in range(args.matcher_workers)
+        ]
+        sessions = (extractor_session, *matcher_sessions)
+    else:
+        session = ort.InferenceSession(str(args.model), providers=requested)
+        sessions = (session,)
+    if args.provider == "cuda" and any(s.get_providers()[0] != "CUDAExecutionProvider" for s in sessions):
+        raise RuntimeError(f"CUDA provider failed to activate: {[s.get_providers() for s in sessions]}")
 
     images = [
         load_gray(args.normalized_data / row["image_path"], width, height)
         for row in rows
     ]
-    keypoints: list[np.ndarray | None] = [None] * len(rows)
-    keypoint_scores: list[np.ndarray | None] = [None] * len(rows)
+    feature_start = time.perf_counter()
+    feature_per_frame_ms: list[float] = []
+    if split_models:
+        keypoints = []
+        descriptors = []
+        for image in images:
+            frame_start = time.perf_counter()
+            points, _, feature = extractor_session.run(None, {"image": image})
+            feature_per_frame_ms.append(1000.0 * (time.perf_counter() - frame_start))
+            keypoints.append(points[0].astype(np.float64))
+            descriptors.append(feature[0].astype(np.float32))
+    else:
+        keypoints = [None] * len(rows)
+        descriptors = []
+        feature_per_frame_ms = [0.0] * len(rows)
+    feature_seconds = time.perf_counter() - feature_start
+    keypoint_scores: list[np.ndarray | None] = [
+        None if points is None else np.zeros(len(points), dtype=np.float32)
+        for points in keypoints
+    ]
     nodes: dict[tuple[int, int], int] = {}
     union_find = UnionFind()
     pair_rows: list[dict[str, int | float]] = []
     rejected_conflicts = 0
+    inlier_edges: list[tuple[int, int, int, int, float]] = []
 
-    for frame0, frame1, pair_type, pose_distance, pose_rotation in pose_gated_pairs(rows, args):
-        kpts0, kpts1, matches0, _, scores0, _ = session.run(
-            None, {"image0": images[frame0], "image1": images[frame1]}
-        )
-        kpts0, kpts1 = kpts0[0].astype(np.float64), kpts1[0].astype(np.float64)
+    pair_specs = pose_gated_pairs(rows, args)
+
+    def match_and_verify(pair: tuple[int, int, str, float, float], session_index: int | None) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float, float, float]:
+        pair_start = time.perf_counter()
+        frame0, frame1, _, _, _ = pair
+        lightglue_start = time.perf_counter()
+        if split_models:
+            kpts0, kpts1 = keypoints[frame0], keypoints[frame1]
+            matches0, _, scores0, _ = matcher_sessions[session_index].run(None, {
+                "kpts0": normalize_keypoints(kpts0, width, height)[None],
+                "kpts1": normalize_keypoints(kpts1, width, height)[None],
+                "desc0": descriptors[frame0][None], "desc1": descriptors[frame1][None],
+            })
+        else:
+            kpts0, kpts1, matches0, _, scores0, _ = session.run(
+                None, {"image0": images[frame0], "image1": images[frame1]}
+            )
+            kpts0, kpts1 = kpts0[0].astype(np.float64), kpts1[0].astype(np.float64)
+        lightglue_ms = 1000.0 * (time.perf_counter() - lightglue_start)
         for frame, current in ((frame0, kpts0), (frame1, kpts1)):
             if keypoints[frame] is None:
                 keypoints[frame] = current
@@ -224,15 +297,40 @@ def main() -> int:
             elif not np.array_equal(keypoints[frame], current):
                 raise RuntimeError(f"SuperPoint output changed across pairs for frame {frame}")
 
-        match_index = matches0[0].astype(np.int64)
-        match_score = scores0[0].astype(np.float32)
+        match_index, match_score = matches0[0].astype(np.int64), scores0[0].astype(np.float32)
         candidate0 = np.flatnonzero((match_index >= 0) & (match_score >= args.min_match_score))
         candidate1 = match_index[candidate0]
+        ransac_start = time.perf_counter()
         mask = geometric_inliers(
             kpts0[candidate0], kpts1[candidate1], rows[frame0], rows[frame1],
-            args.ransac_threshold_px,
+            args.ransac_threshold_px, args.ransac_confidence, args.ransac_max_iters,
         )
-        inlier0, inlier1 = candidate0[mask], candidate1[mask]
+        ransac_ms = 1000.0 * (time.perf_counter() - ransac_start)
+        return candidate0, match_score, candidate0[mask], candidate1[mask], 1000.0 * (time.perf_counter() - pair_start), lightglue_ms, ransac_ms
+
+    matching_start = time.perf_counter()
+    if split_models and args.matcher_workers > 1:
+        session_slots: Queue[int] = Queue()
+        for index in range(args.matcher_workers):
+            session_slots.put(index)
+
+        def parallel_task(pair: tuple[int, int, str, float, float]):
+            session_index = session_slots.get()
+            try:
+                return match_and_verify(pair, session_index)
+            finally:
+                session_slots.put(session_index)
+
+        with ThreadPoolExecutor(max_workers=args.matcher_workers) as executor:
+            match_results = list(executor.map(parallel_task, pair_specs))
+    else:
+        match_results = [match_and_verify(pair, 0 if split_models else None) for pair in pair_specs]
+
+    frame_match_ms = np.zeros(len(rows), dtype=np.float64)
+    frame_lightglue_ms = np.zeros(len(rows), dtype=np.float64)
+    frame_ransac_ms = np.zeros(len(rows), dtype=np.float64)
+    frame_match_pairs = np.zeros(len(rows), dtype=np.int32)
+    for (frame0, frame1, pair_type, pose_distance, pose_rotation), (candidate0, match_score, inlier0, inlier1, pair_ms, lightglue_ms, ransac_ms) in zip(pair_specs, match_results):
         accepted = len(inlier0) >= args.min_pair_inliers
         if accepted:
             for index0, index1 in zip(inlier0, inlier1):
@@ -247,18 +345,43 @@ def main() -> int:
                 ) if (frame1, int(index1)) not in nodes else nodes[(frame1, int(index1))]
                 if not union_find.merge(node0, node1):
                     rejected_conflicts += 1
+                else:
+                    inlier_edges.append((frame0, int(index0), frame1, int(index1), score))
         pair_rows.append({
             "frame0": frame0, "frame1": frame1, "gap": frame1 - frame0,
             "pair_type": pair_type, "pose_distance_m": pose_distance,
             "pose_rotation_deg": pose_rotation,
             "lightglue_matches": int(len(candidate0)),
             "geometric_inliers": int(len(inlier0)), "accepted": int(accepted),
+            "matching_ransac_ms": round(pair_ms, 4),
+            "lightglue_inference_ms": round(lightglue_ms, 4),
+            "essential_ransac_ms": round(ransac_ms, 4),
         })
+        frame_match_ms[frame0] += pair_ms
+        frame_match_ms[frame1] += pair_ms
+        frame_lightglue_ms[frame0] += lightglue_ms
+        frame_lightglue_ms[frame1] += lightglue_ms
+        frame_ransac_ms[frame0] += ransac_ms
+        frame_ransac_ms[frame1] += ransac_ms
+        frame_match_pairs[frame0] += 1
+        frame_match_pairs[frame1] += 1
+    matching_seconds = time.perf_counter() - matching_start
 
     roots = Counter(union_find.find(node) for node in nodes.values())
     valid_roots = sorted(root for root, count in roots.items() if count >= 2)
     track_by_root = {root: track for track, root in enumerate(valid_roots)}
     args.output.mkdir(parents=True, exist_ok=True)
+    if split_models:
+        # Persist raw neural features once.  Downstream BA may prune or merge
+        # landmarks, but the pixel-space keypoint -> current-landmark lookup is
+        # cheap and lets loop closure avoid another SuperPoint inference pass.
+        cache_dir = args.output / "feature_cache"
+        cache_dir.mkdir(exist_ok=True)
+        for frame, (points, descriptor) in enumerate(zip(keypoints, descriptors)):
+            np.savez_compressed(
+                cache_dir / f"frame_{frame:06d}.npz",
+                keypoints=points.astype(np.float32), descriptors=descriptor,
+            )
     with (args.output / "keypoints.csv").open("w", newline="", encoding="utf-8") as stream:
         fields = ("vertex_index", "keypoint_index", "u_px", "v_px", "score", "track_id")
         writer = csv.DictWriter(stream, fieldnames=fields)
@@ -277,15 +400,45 @@ def main() -> int:
         writer = csv.DictWriter(stream, fieldnames=pair_rows[0].keys())
         writer.writeheader()
         writer.writerows(pair_rows)
+    with (args.output / "timing_per_frame.csv").open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(stream, fieldnames=("frame_index", "superpoint_ms", "incident_pair_count", "matching_ransac_ms_sum", "matching_ransac_ms_mean", "lightglue_inference_ms_sum", "lightglue_inference_ms_mean", "essential_ransac_ms_sum", "essential_ransac_ms_mean"))
+        writer.writeheader()
+        for frame, feature_ms in enumerate(feature_per_frame_ms):
+            writer.writerow({
+                "frame_index": frame, "superpoint_ms": round(feature_ms, 4),
+                "incident_pair_count": int(frame_match_pairs[frame]),
+                "matching_ransac_ms_sum": round(float(frame_match_ms[frame]), 4),
+                "matching_ransac_ms_mean": round(float(frame_match_ms[frame] / frame_match_pairs[frame]), 4) if frame_match_pairs[frame] else 0.0,
+                "lightglue_inference_ms_sum": round(float(frame_lightglue_ms[frame]), 4),
+                "lightglue_inference_ms_mean": round(float(frame_lightglue_ms[frame] / frame_match_pairs[frame]), 4) if frame_match_pairs[frame] else 0.0,
+                "essential_ransac_ms_sum": round(float(frame_ransac_ms[frame]), 4),
+                "essential_ransac_ms_mean": round(float(frame_ransac_ms[frame] / frame_match_pairs[frame]), 4) if frame_match_pairs[frame] else 0.0,
+            })
+    with (args.output / "track_inlier_edges.csv").open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.writer(stream)
+        writer.writerow(("frame0", "keypoint0", "frame1", "keypoint1", "lightglue_score"))
+        writer.writerows(inlier_edges)
     track_lengths = Counter(roots[root] for root in valid_roots)
     report = {
-        "backend": "onnxruntime", "provider": session.get_providers()[0],
-        "model": str(args.model), "model_sha256": "3d7479132d7b27dfb4d3cd69274c4542c0499cba9ce4bf7be8df4430600baf83",
+        "backend": "onnxruntime", "provider": sessions[0].get_providers()[0],
+        "model": str(args.model) if args.model else None,
+        "extractor_model": str(args.extractor_model) if split_models else None,
+        "matcher_model": str(args.matcher_model) if split_models else None,
+        "model_sha256": "3d7479132d7b27dfb4d3cd69274c4542c0499cba9ce4bf7be8df4430600baf83" if args.model else None,
         "image_size": [width, height], "frames": len(rows),
         "detected_keypoints": [len(points) for points in keypoints],
         "tracks": len(valid_roots), "track_length_histogram": dict(sorted(track_lengths.items())),
         "accepted_pairs": sum(int(row["accepted"]) for row in pair_rows),
         "total_pairs": len(pair_rows), "rejected_track_conflicts": rejected_conflicts,
+        "timing_seconds": {"feature_extraction": feature_seconds, "pair_matching_and_ransac": matching_seconds, "total": feature_seconds + matching_seconds},
+        "timing_per_frame_csv": "timing_per_frame.csv",
+        "matcher_workers": args.matcher_workers,
+        "essential_ransac": {
+            "threshold_px": args.ransac_threshold_px,
+            "confidence": args.ransac_confidence,
+            "max_iterations": args.ransac_max_iters,
+        },
+        "track_inlier_edges": len(inlier_edges),
         "pose_gated": {
             "enabled": not args.disable_pose_gated_pairs,
             "min_distance_m": args.pose_gated_min_distance_m,
