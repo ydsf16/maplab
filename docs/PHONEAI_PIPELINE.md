@@ -48,8 +48,24 @@ PnP verification, session-pair SE(3) RANSAC, Maplab multi-mission PGO, and a
 final joint VI-BA. It exports an integrated VI-Map, per-session dense IMU and
 camera TUM trajectories, and a colour-coded Rerun recording.
 
-Use the joint map's final camera poses and calibration as the source of the
-future multi-session DA3/TSDF entry point.
+Then run global geometry and pure-3D semantics:
+
+```bash
+# Each session keeps its own final intrinsics and joint-map camera poses.
+bash process.sh multisession-geometry \
+  --joint-output /root/data/maplab_results/combined \
+  --output /root/data/maplab_results/combined/25_multisession_geometry
+
+# Mosaic3D operates once on the globally fused TSDF.
+bash process.sh semantics \
+  --geometry-output /root/data/maplab_results/combined/25_multisession_geometry \
+  --output /root/data/maplab_results/combined/26_multisession_semantics_mosaic3d \
+  --profile indoor
+```
+
+`multisession-geometry` selects and windows frames within each Mission only,
+keeps the DA3 model resident across all windows, and integrates every depth
+prediction into one global TSDF in the joint Maplab frame.
 
 ## External model assets
 
