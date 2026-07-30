@@ -24,37 +24,38 @@ are deliberately outside Git.
 
 ```bash
 # Trajectory: import -> learned matching -> loop closure -> PGO -> final VI-BA.
-bash process.sh full \
+bash process.sh sfm \
   --data /root/data/recorder/SR_xxx \
-  --output /root/data/maplab_results/SR_xxx_full \
+  --output /root/data/maplab_results/SR_xxx_sfm \
   --force
 
 # Dense geometry: final VI-BA pose -> DA3 -> one global TSDF.
 bash process.sh geometry \
-  --slam-output /root/data/maplab_results/SR_xxx_full \
+  --slam-output /root/data/maplab_results/SR_xxx_sfm \
   --data /root/data/recorder/SR_xxx \
-  --output /root/data/maplab_results/SR_xxx_full/geometry
+  --output /root/data/maplab_results/SR_xxx_sfm/geometry
 
 # Pure 3D semantics: TSDF point cloud -> Mosaic3D.
 bash process.sh semantics \
-  --geometry-output /root/data/maplab_results/SR_xxx_full/geometry \
-  --output /root/data/maplab_results/SR_xxx_full/semantics_mosaic3d \
-  --profile indoor
+  --geometry-output /root/data/maplab_results/SR_xxx_sfm/geometry \
+  --output /root/data/maplab_results/SR_xxx_sfm/semantics_mosaic3d
 ```
 
 DA3 uses 20-frame windows with 4-frame overlap by default. The model remains
 resident on the GPU, and all window depths fuse into one TSDF.
+Mosaic3D uses the complete compact world class catalog; no indoor/outdoor
+profile is applied.
 
 ### Multiple trajectories
 
-First run `full` once for every recording. Then register the sessions and
+First run `sfm` once for every recording. Then register the sessions and
 perform joint visual-inertial optimization:
 
 ```bash
-bash tools/sensor-recorder-multisession/run_multisession.sh \
-  --session /root/data/maplab_results/SR_a_full \
-  --session /root/data/maplab_results/SR_b_full \
-  --session /root/data/maplab_results/SR_c_full \
+bash process.sh multisession-sfm \
+  --session /root/data/maplab_results/SR_a_sfm \
+  --session /root/data/maplab_results/SR_b_sfm \
+  --session /root/data/maplab_results/SR_c_sfm \
   --output /root/data/maplab_results/combined
 
 # Per-Mission DA3 windows, one joint TSDF, then one global 3D semantic map.
@@ -64,8 +65,7 @@ bash process.sh multisession-geometry \
 
 bash process.sh semantics \
   --geometry-output /root/data/maplab_results/combined/25_multisession_geometry \
-  --output /root/data/maplab_results/combined/26_multisession_semantics_mosaic3d \
-  --profile indoor
+  --output /root/data/maplab_results/combined/26_multisession_semantics_mosaic3d
 ```
 
 Cross-session registration uses SALAD retrieval, SuperPoint + LightGlue,
@@ -77,14 +77,15 @@ boundaries; every Mission uses its own final intrinsics and global camera pose.
 
 | Stage | Main output | Meaning |
 | --- | --- | --- |
-| `full` | `maps/08_visual_inertial_ba_loops_preview/vi_map` | Final single-trajectory VI-Map |
-| `full` | `poses/imu_poses_tum.txt` | Dense IMU pose, `T_M_I`, TUM format |
-| `full` | `poses/image_poses_tum.txt` | Dense camera pose, `T_M_C`, TUM format |
-| `full` | `rerun_*.rrd` | SLAM diagnostics, loops, tracks and trajectories |
-| `geometry` | `tsdf/tsdf_mesh_clean.glb` | Colored global TSDF mesh |
-| `geometry` | `rerun_geometry.rrd` | TSDF and final VI-BA trajectory |
+| `sfm` | `maps/08_visual_inertial_ba_loops_preview/vi_map` | Final single-trajectory VI-Map |
+| `sfm` | `poses/imu_poses_tum.txt` | Dense IMU pose, `T_M_I`, TUM format |
+| `sfm` | `poses/image_poses_tum.txt` | Dense camera pose, `T_M_C`, TUM format |
+| `sfm` | `rerun_*.rrd` | SLAM diagnostics, loops, tracks and trajectories |
+| `geometry` | `tsdf/tsdf_pointcloud.ply` | Colored global TSDF point cloud for downstream use |
+| `geometry` | `tsdf/tsdf_mesh_clean.ply` / `tsdf/tsdf_mesh_clean.glb` | Global TSDF mesh in interoperable formats |
+| `geometry` | `rerun_geometry.rrd` | Visual inspection of TSDF and final VI-BA trajectory |
 | `semantics` | `semantic_colored.ply` | RGB, semantic ID, confidence and class scores per point |
-| `semantics` | `rerun_semantic.rrd` | Global semantic point cloud |
+| `semantics` | `rerun_semantic.rrd` | Visual inspection of the global semantic point cloud |
 | multi-session | `joint_vimap/` and `poses/<session>/` | Joint map and per-session TUM trajectories in one map frame |
 
 All poses use Maplab's right-handed Z-up map frame, in metres. Gravity is
@@ -100,7 +101,7 @@ Expected runtime assets are:
 - Mosaic3D RECAP-CLIP configuration: `/root/autodl-tmp/mosaic3d/models/recap_clip`
 
 Mosaic3D requires `spconv`, `open-clip-torch`, `timm`, `transformers`, and
-`jaxtyping` in the DA3 Python environment. For the full stage-by-stage contract,
+`jaxtyping` in the DA3 Python environment. For the detailed stage-by-stage contract,
 see [docs/PHONEAI_PIPELINE.md](docs/PHONEAI_PIPELINE.md).
 
 ---
