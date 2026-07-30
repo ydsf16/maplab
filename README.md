@@ -1,4 +1,4 @@
-# PhoneAI: Sensor Recorder Pro offline spatial pipeline
+# Phone AI: Spatial process pipeline
 
 This fork turns an iPhone Sensor Recorder Pro ARKit recording into three
 incremental spatial representations:
