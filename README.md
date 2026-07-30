@@ -1,3 +1,112 @@
+# PhoneAI: Sensor Recorder Pro offline spatial pipeline
+
+This fork turns an iPhone Sensor Recorder Pro ARKit recording into three
+incremental spatial representations:
+
+```text
+RGB + ARKit pose + IMU
+        -> globally consistent visual-inertial trajectories
+        -> DA3 depth + global TSDF geometry
+        -> Mosaic3D pure-3D semantic point cloud
+```
+
+It retains Maplab as the visual-inertial and multi-Mission backend, and adds
+SuperPoint + LightGlue matching, SALAD loop retrieval, DA3 geometry, Mosaic3D
+semantic inference, TUM exports, and Rerun visualization.
+
+## Quick start
+
+`process.sh` is the public processing entry point. Build the Maplab runtime and
+install the external model assets before running it. Raw recordings and results
+are deliberately outside Git.
+
+### Single trajectory
+
+```bash
+# Trajectory: import -> learned matching -> loop closure -> PGO -> final VI-BA.
+bash process.sh full \
+  --data /root/data/recorder/SR_xxx \
+  --output /root/data/maplab_results/SR_xxx_full \
+  --force
+
+# Dense geometry: final VI-BA pose -> DA3 -> one global TSDF.
+bash process.sh geometry \
+  --slam-output /root/data/maplab_results/SR_xxx_full \
+  --data /root/data/recorder/SR_xxx \
+  --output /root/data/maplab_results/SR_xxx_full/geometry
+
+# Pure 3D semantics: TSDF point cloud -> Mosaic3D.
+bash process.sh semantics \
+  --geometry-output /root/data/maplab_results/SR_xxx_full/geometry \
+  --output /root/data/maplab_results/SR_xxx_full/semantics_mosaic3d \
+  --profile indoor
+```
+
+DA3 uses 20-frame windows with 4-frame overlap by default. The model remains
+resident on the GPU, and all window depths fuse into one TSDF.
+
+### Multiple trajectories
+
+First run `full` once for every recording. Then register the sessions and
+perform joint visual-inertial optimization:
+
+```bash
+bash tools/sensor-recorder-multisession/run_multisession.sh \
+  --session /root/data/maplab_results/SR_a_full \
+  --session /root/data/maplab_results/SR_b_full \
+  --session /root/data/maplab_results/SR_c_full \
+  --output /root/data/maplab_results/combined
+
+# Per-Mission DA3 windows, one joint TSDF, then one global 3D semantic map.
+bash process.sh multisession-geometry \
+  --joint-output /root/data/maplab_results/combined \
+  --output /root/data/maplab_results/combined/25_multisession_geometry
+
+bash process.sh semantics \
+  --geometry-output /root/data/maplab_results/combined/25_multisession_geometry \
+  --output /root/data/maplab_results/combined/26_multisession_semantics_mosaic3d \
+  --profile indoor
+```
+
+Cross-session registration uses SALAD retrieval, SuperPoint + LightGlue,
+2D-3D PnP verification, session-pair SE(3) RANSAC, Maplab PGO, PGO-gated
+observation fusion, and joint VI-BA. DA3 windows never cross Mission
+boundaries; every Mission uses its own final intrinsics and global camera pose.
+
+## Outputs
+
+| Stage | Main output | Meaning |
+| --- | --- | --- |
+| `full` | `maps/08_visual_inertial_ba_loops_preview/vi_map` | Final single-trajectory VI-Map |
+| `full` | `poses/imu_poses_tum.txt` | Dense IMU pose, `T_M_I`, TUM format |
+| `full` | `poses/image_poses_tum.txt` | Dense camera pose, `T_M_C`, TUM format |
+| `full` | `rerun_*.rrd` | SLAM diagnostics, loops, tracks and trajectories |
+| `geometry` | `tsdf/tsdf_mesh_clean.glb` | Colored global TSDF mesh |
+| `geometry` | `rerun_geometry.rrd` | TSDF and final VI-BA trajectory |
+| `semantics` | `semantic_colored.ply` | RGB, semantic ID, confidence and class scores per point |
+| `semantics` | `rerun_semantic.rrd` | Global semantic point cloud |
+| multi-session | `joint_vimap/` and `poses/<session>/` | Joint map and per-session TUM trajectories in one map frame |
+
+All poses use Maplab's right-handed Z-up map frame, in metres. Gravity is
+negative Z. Camera pose is `T_M_C`; DA3 receives its inverse, `T_C_M`.
+
+## External assets
+
+The repository contains the pipeline code, not model weights or recordings.
+Expected runtime assets are:
+
+- DA3 GIANT: `/root/autodl-tmp/da3/models/DA3-GIANT-1.1`
+- Mosaic3D checkpoint: `/root/autodl-tmp/mosaic3d/models/sc+ar+sc++.ckpt`
+- Mosaic3D RECAP-CLIP configuration: `/root/autodl-tmp/mosaic3d/models/recap_clip`
+
+Mosaic3D requires `spconv`, `open-clip-torch`, `timm`, `transformers`, and
+`jaxtyping` in the DA3 Python environment. For the full stage-by-stage contract,
+see [docs/PHONEAI_PIPELINE.md](docs/PHONEAI_PIPELINE.md).
+
+---
+
+## Upstream Maplab
+
 <img src="https://raw.githubusercontent.com/ethz-asl/maplab/master/docs/pages/logos/maplab_new.png" width="500">
 
 
