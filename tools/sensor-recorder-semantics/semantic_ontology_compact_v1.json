@@ -1,0 +1,58 @@
+{
+  "name": "phone_ai_semantic_ontology_compact_v1",
+  "description": "Compact stable semantic IDs for common indoor, outdoor and traffic scenes.",
+  "classes": [
+    {"id": 0, "name": "wall", "group": "structure", "profiles": ["indoor", "outdoor"]},
+    {"id": 1, "name": "floor", "group": "structure", "profiles": ["indoor"]},
+    {"id": 2, "name": "ceiling", "group": "structure", "profiles": ["indoor"]},
+    {"id": 3, "name": "door", "group": "structure", "profiles": ["indoor", "outdoor"]},
+    {"id": 4, "name": "window", "group": "structure", "profiles": ["indoor", "outdoor"]},
+    {"id": 5, "name": "stairs", "group": "structure", "profiles": ["indoor", "outdoor"]},
+    {"id": 6, "name": "railing", "group": "structure", "profiles": ["indoor", "outdoor"]},
+
+    {"id": 20, "name": "chair", "group": "furniture", "profiles": ["indoor", "outdoor"]},
+    {"id": 22, "name": "sofa", "group": "furniture", "profiles": ["indoor"]},
+    {"id": 24, "name": "bench", "group": "furniture", "profiles": ["indoor", "outdoor"]},
+    {"id": 25, "name": "table", "group": "furniture", "profiles": ["indoor", "outdoor"]},
+    {"id": 26, "name": "desk", "group": "furniture", "profiles": ["indoor"]},
+    {"id": 27, "name": "bed", "group": "furniture", "profiles": ["indoor"]},
+    {"id": 28, "name": "cabinet", "group": "furniture", "profiles": ["indoor"]},
+    {"id": 29, "name": "shelf", "group": "furniture", "profiles": ["indoor"]},
+
+    {"id": 34, "name": "sink", "group": "fixture", "profiles": ["indoor"]},
+    {"id": 35, "name": "toilet", "group": "fixture", "profiles": ["indoor"]},
+    {"id": 38, "name": "mirror", "group": "fixture", "profiles": ["indoor"]},
+    {"id": 39, "name": "curtain", "group": "fixture", "profiles": ["indoor"]},
+    {"id": 41, "name": "picture", "group": "decor", "profiles": ["indoor"]},
+    {"id": 42, "name": "plant", "group": "nature", "profiles": ["indoor", "outdoor"]},
+    {"id": 43, "name": "lamp", "group": "fixture", "profiles": ["indoor", "outdoor"]},
+
+    {"id": 60, "name": "monitor", "group": "electronics", "profiles": ["indoor"]},
+    {"id": 61, "name": "television", "group": "electronics", "profiles": ["indoor"]},
+    {"id": 62, "name": "laptop", "group": "electronics", "profiles": ["indoor"]},
+    {"id": 63, "name": "keyboard", "group": "electronics", "profiles": ["indoor"]},
+    {"id": 70, "name": "refrigerator", "group": "appliance", "profiles": ["indoor"]},
+    {"id": 77, "name": "bottle", "group": "object", "profiles": ["indoor", "outdoor"]},
+    {"id": 81, "name": "bag", "group": "object", "profiles": ["indoor", "outdoor"]},
+    {"id": 84, "name": "box", "group": "object", "profiles": ["indoor", "outdoor"]},
+
+    {"id": 100, "name": "building", "group": "outdoor_structure", "profiles": ["outdoor", "traffic"]},
+    {"id": 102, "name": "road", "group": "ground", "profiles": ["outdoor", "traffic"]},
+    {"id": 103, "name": "sidewalk", "group": "ground", "profiles": ["outdoor", "traffic"]},
+    {"id": 107, "name": "grass", "group": "nature", "profiles": ["outdoor"]},
+    {"id": 111, "name": "tree", "group": "nature", "profiles": ["outdoor"]},
+
+    {"id": 120, "name": "car", "group": "vehicle", "profiles": ["outdoor", "traffic"]},
+    {"id": 121, "name": "truck", "group": "vehicle", "profiles": ["outdoor", "traffic"]},
+    {"id": 122, "name": "bus", "group": "vehicle", "profiles": ["outdoor", "traffic"]},
+    {"id": 124, "name": "motorcycle", "group": "vehicle", "profiles": ["outdoor", "traffic"]},
+    {"id": 125, "name": "bicycle", "group": "vehicle", "profiles": ["outdoor", "traffic"]},
+    {"id": 131, "name": "traffic light", "group": "traffic_control", "profiles": ["outdoor", "traffic"]},
+    {"id": 132, "name": "traffic sign", "group": "traffic_control", "profiles": ["outdoor", "traffic"]},
+
+    {"id": 140, "name": "person", "group": "human", "profiles": ["indoor", "outdoor", "traffic"]},
+    {"id": 150, "name": "dog", "group": "animal", "profiles": ["indoor", "outdoor", "traffic"]},
+    {"id": 151, "name": "cat", "group": "animal", "profiles": ["indoor", "outdoor"]},
+    {"id": 255, "name": "other", "group": "other", "profiles": ["indoor", "outdoor", "traffic"]}
+  ]
+}

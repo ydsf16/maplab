@@ -60,6 +60,16 @@ if [[ "${1:-}" == "superpoint-lightglue" ]]; then
   exec "${repo_dir}/tools/sensor-recorder-features/run_superpoint_lightglue.sh" "$@"
 fi
 
+if [[ "${1:-}" == "geometry" ]]; then
+  shift
+  exec "${repo_dir}/tools/sensor-recorder-geometry/run_geometry.sh" "$@"
+fi
+
+if [[ "${1:-}" == "semantics" ]]; then
+  shift
+  exec "${repo_dir}/tools/sensor-recorder-semantics/run_semantics.sh" "$@"
+fi
+
 if [[ "${1:-}" == "loop-closure" ]]; then
   shift
   exec "${repo_dir}/tools/sensor-recorder-loop-closure/run_loop_closure.sh" "$@"

@@ -20,6 +20,8 @@ DEFINE_int32(min_merge_support, 1,
 namespace {
 
 struct Observation {
+  pose_graph::VertexId query_vertex_id;
+  bool has_explicit_vertex_id = false;
   uint64_t query_timestamp_ns;
   vi_map::LandmarkId candidate_landmark_id;
   unsigned int query_keypoint_index;
@@ -38,6 +40,11 @@ std::vector<Observation> loadObservations(const std::string& filename) {
     }
     for (const YAML::Node& node : pnp_observations) {
       Observation observation;
+      if (loop["camera_to"]["vertex_id"]) {
+        CHECK(observation.query_vertex_id.fromHexString(
+            loop["camera_to"]["vertex_id"].as<std::string>()));
+        observation.has_explicit_vertex_id = true;
+      }
       observation.query_timestamp_ns = query_timestamp_ns;
       CHECK(observation.candidate_landmark_id.fromHexString(
           node["candidate_landmark_id"].as<std::string>()));
@@ -73,7 +80,14 @@ int main(int argc, char** argv) {
   for (const Observation& observation : loadObservations(FLAGS_loops_yaml)) {
     pose_graph::VertexId query_vertex_id;
     uint64_t timestamp_delta = 0u;
-    if (!queries.getClosestVertexIdByTimestamp(
+    if (observation.has_explicit_vertex_id) {
+      query_vertex_id = observation.query_vertex_id;
+      if (!map.hasVertex(query_vertex_id) ||
+          !map.hasLandmark(observation.candidate_landmark_id)) {
+        ++skipped;
+        continue;
+      }
+    } else if (!queries.getClosestVertexIdByTimestamp(
             observation.query_timestamp_ns, kTimestampToleranceNs,
             &query_vertex_id, &timestamp_delta) ||
         !map.hasLandmark(observation.candidate_landmark_id)) {

@@ -26,9 +26,15 @@ int main(int argc, char** argv) {
   CHECK(vi_map::serialization::loadMapFromFolder(FLAGS_map, &map));
   vi_map::MissionIdList mission_ids;
   map.getAllMissionIds(&mission_ids);
-  CHECK_EQ(mission_ids.size(), 1u);
   pose_graph::VertexIdList vertex_ids;
-  map.getAllVertexIdsInMissionAlongGraph(mission_ids.front(), &vertex_ids);
+  std::vector<std::string> vertex_mission_ids;
+  for (const vi_map::MissionId& mission_id : mission_ids) {
+    pose_graph::VertexIdList mission_vertices;
+    map.getAllVertexIdsInMissionAlongGraph(mission_id, &mission_vertices);
+    vertex_ids.insert(vertex_ids.end(), mission_vertices.begin(), mission_vertices.end());
+    vertex_mission_ids.insert(vertex_mission_ids.end(), mission_vertices.size(),
+                              mission_id.hexString());
+  }
 
   std::ofstream vertices(FLAGS_output + "/vertices.csv");
   std::ofstream keypoints(FLAGS_output + "/keypoints.csv");
@@ -39,7 +45,7 @@ int main(int argc, char** argv) {
   vertices << std::setprecision(17);
   keypoints << std::setprecision(17);
   landmarks << std::setprecision(17);
-  vertices << "vertex_index,timestamp_ns,p_x_m,p_y_m,p_z_m,q_w,q_x,q_y,q_z,"
+  vertices << "vertex_index,mission_id,vertex_id,timestamp_ns,p_x_m,p_y_m,p_z_m,q_w,q_x,q_y,q_z,"
               "v_x_m_s,v_y_m_s,v_z_m_s,accel_bias_x,accel_bias_y,"
               "accel_bias_z,gyro_bias_x,gyro_bias_y,gyro_bias_z\n";
   keypoints << "vertex_index,u_px,v_px,has_landmark,landmark_id\n";
@@ -56,7 +62,9 @@ int main(int argc, char** argv) {
     const Eigen::Vector3d& accel_bias = vertex.getAccelBias();
     const Eigen::Vector3d& gyro_bias = vertex.getGyroBias();
     const int64_t timestamp_ns = vertex.getVisualFrame(0u).getTimestampNanoseconds();
-    vertices << vertex_index << ',' << timestamp_ns << ',' << p.x() << ','
+    vertices << vertex_index << ',' << vertex_mission_ids[vertex_index] << ','
+             << vertex_ids[vertex_index].hexString()
+             << ',' << timestamp_ns << ',' << p.x() << ','
              << p.y() << ',' << p.z() << ',' << q.w() << ',' << q.x() << ','
              << q.y() << ',' << q.z() << ',' << v.x() << ',' << v.y() << ','
              << v.z() << ',' << accel_bias.x() << ',' << accel_bias.y() << ','

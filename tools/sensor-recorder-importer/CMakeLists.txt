@@ -19,6 +19,8 @@ cs_add_executable(sensor_recorder_posegraph_relax
                   src/sensor-recorder-posegraph-relax.cc)
 cs_add_executable(sensor_recorder_loop_observations
                   src/sensor-recorder-loop-observations.cc)
+cs_add_executable(sensor_recorder_multisession_merge
+                  src/sensor-recorder-multisession-merge.cc)
 
 cs_install()
 cs_export()

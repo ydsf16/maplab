@@ -45,6 +45,9 @@ pose::Transformation transformFromYaml(const YAML::Node& yaml) {
 }
 
 struct ExternalLoop {
+  pose_graph::VertexId from_vertex_id;
+  pose_graph::VertexId to_vertex_id;
+  bool has_explicit_vertex_ids = false;
   uint64_t from_timestamp_ns;
   uint64_t to_timestamp_ns;
   pose::Transformation T_M_from;
@@ -53,6 +56,7 @@ struct ExternalLoop {
   double switch_variable;
   double switch_variable_variance;
   Eigen::Matrix<double, 6, 6> covariance;
+  bool direct_constraint = false;
   YAML::Node source;
 };
 
@@ -60,6 +64,13 @@ std::vector<ExternalLoop> loadLoops(const std::string& filename) {
   std::vector<ExternalLoop> loops;
   for (const YAML::Node& node : YAML::LoadFile(filename)) {
     ExternalLoop loop;
+    if (node["camera_from"]["vertex_id"] && node["camera_to"]["vertex_id"]) {
+      CHECK(loop.from_vertex_id.fromHexString(
+          node["camera_from"]["vertex_id"].as<std::string>()));
+      CHECK(loop.to_vertex_id.fromHexString(
+          node["camera_to"]["vertex_id"].as<std::string>()));
+      loop.has_explicit_vertex_ids = true;
+    }
     loop.from_timestamp_ns = node["camera_from"]["timestamp_ns"].as<uint64_t>();
     loop.source = node;
     loop.to_timestamp_ns = node["camera_to"]["timestamp_ns"].as<uint64_t>();
@@ -67,6 +78,8 @@ std::vector<ExternalLoop> loadLoops(const std::string& filename) {
     loop.T_M_to = transformFromYaml(node["camera_to"]["pose"]);
     loop.T_from_to = transformFromYaml(node["T_from_to"]);
     loop.switch_variable = node["switch_variable"].as<double>();
+    loop.direct_constraint = node["direct_constraint"] ?
+        node["direct_constraint"].as<bool>() : false;
     loop.switch_variable_variance = node["switch_variable_variance"].as<double>();
     const std::vector<double> covariance = node["covariance"].as<std::vector<double>>();
     CHECK_EQ(covariance.size(), 36u);
@@ -88,7 +101,14 @@ std::vector<AttachedLoop> addExternalLoops(
   for (const ExternalLoop& edge : edges) {
     pose_graph::VertexId from_id, to_id;
     uint64_t from_delta = 0u, to_delta = 0u;
-    if (!queries.getClosestVertexIdByTimestamp(
+    if (edge.has_explicit_vertex_ids) {
+      from_id = edge.from_vertex_id;
+      to_id = edge.to_vertex_id;
+      if (!map->hasVertex(from_id) || !map->hasVertex(to_id)) {
+        LOG(WARNING) << "Skipping loop with missing explicit vertex IDs";
+        continue;
+      }
+    } else if (!queries.getClosestVertexIdByTimestamp(
             edge.from_timestamp_ns, kTimestampToleranceNs, &from_id,
             &from_delta) ||
         !queries.getClosestVertexIdByTimestamp(
@@ -99,9 +119,10 @@ std::vector<AttachedLoop> addExternalLoops(
     }
     const vi_map::Vertex& from_vertex = map->getVertex(from_id);
     const vi_map::Vertex& to_vertex = map->getVertex(to_id);
-    const pose::Transformation T_loop = adaptTransformation(
-        edge.T_M_from, edge.T_M_to, from_vertex.get_T_M_I(),
-        to_vertex.get_T_M_I(), edge.T_from_to);
+    const pose::Transformation T_loop = edge.direct_constraint ?
+        edge.T_from_to : adaptTransformation(
+            edge.T_M_from, edge.T_M_to, from_vertex.get_T_M_I(),
+            to_vertex.get_T_M_I(), edge.T_from_to);
     pose_graph::EdgeId edge_id;
     aslam::generateId(&edge_id);
     map->addEdge(aligned_unique<vi_map::LoopClosureEdge>(
