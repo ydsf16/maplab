@@ -99,7 +99,7 @@ struct CalibrationSnapshot {
 CalibrationSnapshot getCalibrationSnapshot(const vi_map::VIMap& map) {
   vi_map::MissionIdList mission_ids;
   map.getAllMissionIds(&mission_ids);
-  CHECK_EQ(mission_ids.size(), 1u);
+  CHECK(!mission_ids.empty());
   const aslam::NCamera& ncamera = map.getMissionNCamera(mission_ids.front());
   CHECK_EQ(ncamera.getNumCameras(), 1u);
   return CalibrationSnapshot{
@@ -425,10 +425,13 @@ int main(int argc, char** argv) {
 
   vi_map::MissionIdList mission_ids;
   map.getAllMissionIds(&mission_ids);
-  CHECK_EQ(mission_ids.size(), 1u);
-  const vi_map::MissionId mission_id = mission_ids.front();
   pose_graph::VertexIdList vertex_ids;
-  map.getAllVertexIdsInMissionAlongGraph(mission_id, &vertex_ids);
+  for (const vi_map::MissionId& mission_id : mission_ids) {
+    pose_graph::VertexIdList mission_vertex_ids;
+    map.getAllVertexIdsInMissionAlongGraph(mission_id, &mission_vertex_ids);
+    vertex_ids.insert(vertex_ids.end(), mission_vertex_ids.begin(),
+                      mission_vertex_ids.end());
+  }
   CHECK_GE(vertex_ids.size(), 2u);
 
   std::vector<Eigen::Vector3d> positions_before;
@@ -522,11 +525,14 @@ int main(int argc, char** argv) {
   }
   if (FLAGS_run_frontend || !FLAGS_tracks_csv.empty()) {
     vi_map_helpers::VIMapManipulation manipulation(&map);
-    const size_t landmark_count =
-        manipulation.initializeLandmarksFromUnusedFeatureTracksOfMission(
-            mission_id);
+    size_t landmark_count = 0u;
+    for (const vi_map::MissionId& mission_id : mission_ids) {
+      landmark_count +=
+          manipulation.initializeLandmarksFromUnusedFeatureTracksOfMission(
+              mission_id);
+      landmark_triangulation::retriangulateLandmarksOfMission(mission_id, &map);
+    }
     CHECK_GT(landmark_count, 0u);
-    landmark_triangulation::retriangulateLandmarksOfMission(mission_id, &map);
   }
   CHECK_GT(map.numLandmarks(), 0u);
   CHECK(vi_map::checkMapConsistency(map));
@@ -562,7 +568,7 @@ int main(int argc, char** argv) {
   options.fix_velocity = !FLAGS_optimize_velocity;
   if (FLAGS_use_imu) {
     options.gravity_magnitude =
-        map.getMissionImu(mission_id).getGravityMagnitudeMps2();
+        map.getMissionImu(mission_ids.front()).getGravityMagnitudeMps2();
   }
   options.fix_intrinsics = !FLAGS_optimize_intrinsics;
   options.fix_extrinsics_rotation = !FLAGS_optimize_extrinsics;
@@ -574,7 +580,8 @@ int main(int argc, char** argv) {
   map_optimization::VIMapOptimizer optimizer(nullptr, kEnableSignalHandler);
   map_optimization::OptimizationProblemResult optimization_result;
   CHECK(optimizer.optimize(
-      options, vi_map::MissionIdSet{mission_id}, &map, &optimization_result));
+      options, vi_map::MissionIdSet(mission_ids.begin(), mission_ids.end()),
+      &map, &optimization_result));
   CHECK(!optimization_result.solver_summaries.empty());
   const ceres::Solver::Summary& initial_summary =
       optimization_result.solver_summaries.front();

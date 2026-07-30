@@ -49,6 +49,8 @@ CMakeLists.txt.user
 
 # MacOS Desktop Services Store.
 .DS_Store
+._*
+__pycache__/
 
 # Maplab temporary files.
 *.vi_command_history
