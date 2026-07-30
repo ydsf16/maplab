@@ -16,3 +16,4 @@ check_dir "DA3 model" "${PHONE_AI_DA3_MODEL}"
 check_file "Mosaic3D checkpoint" "${PHONE_AI_MOSAIC3D_ROOT}/models/sc+ar+sc++.ckpt"
 [[ "${missing}" -eq 0 ]] || exit 2
 "${PHONE_AI_DA3_PYTHON}" -c 'import cv2, onnxruntime, torch; print("Phone AI runtime OK")'
+"${RERUN_PYTHON}" -c 'import rerun, yaml; print("Phone AI Rerun export runtime OK")'

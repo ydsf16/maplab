@@ -28,18 +28,36 @@ run_native() {
 }
 
 map_csv=""
+session_records=()
 printf 'sessions:\n' > "$output/sessions.yaml"
 for result in "${sessions[@]}"; do
   result="$(realpath "$result")"
-  id="$(basename "$result" _full)"
+  id="$(basename "$result")"
+  id="${id%_full}"
+  id="${id%_sfm}"
   source="$result/maps/08_visual_inertial_ba_loops_preview/vi_map"
   [[ -d "$source" ]] || source="$result/maps/04_initial_vi_ba_intrinsics/vi_map"
   export_dir="$output/session_exports/$id"
   rm -rf "$export_dir"; mkdir -p "$export_dir"
   run_native "$native/sensor_recorder_vimap_export" --map="$source" --output="$export_dir"
   printf '  - id: "%s"\n    result: "%s"\n    export: "%s"\n    raw_data: "%s"\n' "$id" "$result" "$export_dir" "$data_root/$id" >> "$output/sessions.yaml"
+  session_records+=("$id" "$result" "$export_dir" "$data_root/$id")
   map_csv+="${map_csv:+,}$source"
 done
+
+python3 - "$output/sessions.json" "${session_records[@]}" <<'PY'
+import json
+import sys
+
+output, *values = sys.argv[1:]
+if len(values) % 4:
+    raise SystemExit("invalid session record list")
+keys = ("id", "result", "export", "raw_data")
+records = [dict(zip(keys, values[index:index + 4])) for index in range(0, len(values), 4)]
+with open(output, "w", encoding="utf-8") as handle:
+    json.dump(records, handle, indent=2)
+    handle.write("\n")
+PY
 
 run_native "$native/sensor_recorder_multisession_merge" --maps="$map_csv" --output="$output/22_multisession_posegraph/joint_vimap"
 
@@ -60,4 +78,6 @@ cp -a "$output/22_multisession_posegraph/joint_vimap" "$output/23_multisession_o
 run_native "$native/sensor_recorder_loop_observations" --map="$output/23_multisession_observation_fusion/joint_vimap" --loops_yaml="$output/22_multisession_posegraph/accepted_loops_after_pgo.yaml" --min_merge_support=1
 cp -a "$output/23_multisession_observation_fusion/joint_vimap" "$output/24_multisession_vi_ba/joint_vimap"
 run_native "$native/sensor_recorder_brisk_ba" --map="$output/24_multisession_vi_ba/joint_vimap" --report="$output/24_multisession_vi_ba/report.json" --run_frontend=false --run_ba=true --use_imu=true --optimize_biases=true --optimize_velocity=true --optimize_intrinsics=false --optimize_extrinsics=false --ba_feature_type=SuperPoint --ba_iterations=50 --ba_outlier_rejection_use_reprojection_error=true --ba_outlier_rejection_max_reprojection_error_px=5.0 --ba_outlier_rejection_reject_every_n_iters=3 --prune_bad_landmarks=true
+run_native "$native/sensor_recorder_vimap_export" --map="$output/24_multisession_vi_ba/joint_vimap" --output="$output/24_multisession_vi_ba/export"
+"${RERUN_PYTHON}" "$repo_dir/tools/sensor-recorder-multisession/export_multisession.py" --root "$output"
 echo "Multi-session VI-BA complete: $output"

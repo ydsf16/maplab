@@ -42,5 +42,7 @@ tar --zstd -cf "${output}" -C / \
   usr/local/lib/python3.10/dist-packages/pyarrow \
   usr/local/lib/python3.10/dist-packages/pyarrow-*.dist-info \
   usr/local/lib/python3.10/dist-packages/typing_extensions.py \
-  usr/local/lib/python3.10/dist-packages/typing_extensions-*.dist-info
+  usr/local/lib/python3.10/dist-packages/typing_extensions-*.dist-info \
+  root/.local/lib/python3.10/site-packages/yaml \
+  root/.local/lib/python3.10/site-packages/pyyaml-*.dist-info
 echo "created ${output}"
