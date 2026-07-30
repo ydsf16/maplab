@@ -8,8 +8,8 @@ TUM Pose 与 Rerun 可视化。原始录制目录保持只读。
 
 ```bash
 bash process.sh full \
-  --data /root/data/recorder/SR_2026-07-29_00-10-03 \
-  --output /root/data/maplab_results/SR_2026-07-29_00-10-03_full \
+  --data "$PHONE_AI_RECORDINGS_DIR/SR_2026-07-29_00-10-03" \
+  --output "$PHONE_AI_DATA_DIR/maplab_results/SR_2026-07-29_00-10-03_sfm" \
   --force
 ```
 
@@ -80,7 +80,7 @@ bash process.sh full \
 
 ```bash
 bash process.sh export-poses \
-  --output /root/data/maplab_results/SR_2026-07-29_00-10-03_full
+  --output "$PHONE_AI_DATA_DIR/maplab_results/SR_2026-07-29_00-10-03_sfm"
 ```
 
 `--stage auto` 默认使用最终 `08` VI-BA；无有效回环时回退到 `04`。也可显式选择
@@ -113,8 +113,8 @@ RERUN_PYTHON
 ```
 
 模型和权重不提交进 Git。默认路径位于
-`/root/autodl-tmp/third_party/LightGlue-ONNX-v1/weights/` 与
-`/root/autodl-tmp/third_party/{salad,dinov2}`。
+`$PHONE_AI_MODELS_DIR/lightglue/` 与
+`$PHONE_AI_MODELS_DIR/{salad,dinov2}`。
 
 在 Mac 上可用 evo 快速检查 TUM 轨迹：
 

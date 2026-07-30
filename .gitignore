@@ -63,3 +63,6 @@ docs/api
 
 # Docker
 docker_ctx/
+
+# Per-machine Phone AI runtime layout.
+.phoneai.env

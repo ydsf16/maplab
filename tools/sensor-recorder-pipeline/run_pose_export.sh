@@ -2,10 +2,12 @@
 set -euo pipefail
 
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck disable=SC1091
+source "${repo_dir}/scripts/phoneai_env.sh"
 result=""
 stage="auto"
-runtime_root="${MAPLAB_RUNTIME_ROOT:-/root/autodl-tmp/maplab-focal}"
-runtime_workspace="${MAPLAB_RUNTIME_WORKSPACE:-/workspace}"
+runtime_root="${MAPLAB_RUNTIME_ROOT}"
+runtime_workspace="${MAPLAB_RUNTIME_WORKSPACE}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in

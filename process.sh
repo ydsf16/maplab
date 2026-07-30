@@ -2,6 +2,8 @@
 set -euo pipefail
 
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+source "${repo_dir}/scripts/phoneai_env.sh"
 python_bin="${PYTHON_BIN:-python3}"
 
 command="${1:-}"

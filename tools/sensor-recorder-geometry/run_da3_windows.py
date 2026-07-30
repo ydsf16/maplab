@@ -2,6 +2,7 @@
 """Run multiple DA3 windows while keeping one model instance resident on the GPU."""
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -14,8 +15,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", type=Path, action="append", required=True)
     parser.add_argument("--output", type=Path, action="append", required=True)
-    parser.add_argument("--repo", type=Path, default=Path("/root/autodl-tmp/da3/repo"))
-    parser.add_argument("--model", type=Path, default=Path("/root/autodl-tmp/da3/models/DA3-GIANT-1.1"))
+    parser.add_argument("--repo", type=Path, default=Path(os.environ["PHONE_AI_DA3_REPO"]))
+    parser.add_argument("--model", type=Path, default=Path(os.environ["PHONE_AI_DA3_MODEL"]))
     parser.add_argument("--process-res", type=int, default=504)
     args = parser.parse_args()
     if len(args.input) != len(args.output):

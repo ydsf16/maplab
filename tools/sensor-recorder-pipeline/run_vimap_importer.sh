@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-runtime_root="${MAPLAB_RUNTIME_ROOT:-/root/autodl-tmp/maplab-focal}"
-runtime_workspace="${MAPLAB_RUNTIME_WORKSPACE:-/workspace}"
-importer="${MAPLAB_IMPORTER_BINARY:-${runtime_workspace}/devel/lib/sensor_recorder_importer/sensor_recorder_to_vimap}"
+repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck disable=SC1091
+source "${repo_dir}/scripts/phoneai_env.sh"
+runtime_root="${MAPLAB_RUNTIME_ROOT}"
+runtime_workspace="${MAPLAB_RUNTIME_WORKSPACE}"
+importer="${MAPLAB_IMPORTER_BINARY}"
 
 command -v proot >/dev/null 2>&1 || {
   echo "proot is required to run the isolated Maplab importer" >&2

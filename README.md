@@ -20,6 +20,71 @@ semantic inference, TUM exports, and Rerun visualization.
 install the external model assets before running it. Raw recordings and results
 are deliberately outside Git.
 
+## Fresh AutoDL deployment
+
+On a new GPU instance, clone the repository and restore the separately
+published runtime archives:
+
+```bash
+git clone https://github.com/ydsf16/maplab-phone-ai.git
+cd maplab-phone-ai
+bash scripts/bootstrap_autodl.sh \
+  --maplab-runtime-archive <runtime-archive-url> \
+  --assets-archive <assets-archive-url> \
+  --python-runtime-archive <python-runtime-archive-url>
+bash scripts/check_runtime.sh
+```
+
+`bootstrap_autodl.sh` detects AutoDL's data disk and stores the runtime, models,
+recordings and temporary files under `/root/autodl-tmp/phone-ai-data`. It falls
+back to `/root/data` on other machines. The system disk only needs the restored
+Python runtime. It writes `.phoneai.env`; see `configs/runtime.env.example` for
+path and environment-variable overrides.
+
+| Archive | Contents | Current compressed size |
+| --- | --- | --- |
+| Maplab runtime | Compiled ROS/Maplab runtime | about 2.7 GB |
+| Assets | ONNX, SALAD, DA3 and Mosaic3D assets | about 7.8 GB |
+| Python runtime | Validated CUDA environments and Rerun | about 4.5 GB |
+
+All three archives are x86_64/CUDA AutoDL release artifacts. Keep model assets
+private unless every included upstream licence permits redistribution.
+
+To create the Maplab runtime artifact from a validated builder instance:
+
+```bash
+source scripts/phoneai_env.sh
+bash scripts/package_maplab_runtime.sh \
+  --output "${PHONE_AI_DATA_DIR}/release-artifacts/phone-ai-maplab-runtime-v0.1.0.tar.zst"
+```
+
+Publish that archive to a release or shared storage, then pass its URL to the
+bootstrap command on a new instance.
+
+For fully offline setup, package the licensed model/source assets too:
+
+```bash
+bash scripts/package_phoneai_assets.sh \
+  --output "${PHONE_AI_DATA_DIR}/release-artifacts/phone-ai-assets-v0.1.0.tar.zst"
+
+bash scripts/package_python_runtime.sh \
+  --output "${PHONE_AI_DATA_DIR}/release-artifacts/phone-ai-python-runtime-v0.1.0.tar.zst"
+```
+
+Then a fresh instance needs one command after cloning the repository:
+
+```bash
+bash scripts/bootstrap_autodl.sh \
+  --maplab-runtime-archive <runtime-url> \
+  --assets-archive <assets-url> \
+  --python-runtime-archive <python-runtime-url> \
+  --remove-local-archives
+```
+
+Only publish or share the asset archive when every included upstream model and
+weight licence permits redistribution. Keep a private archive for personal
+AutoDL deployment when a licence is restrictive.
+
 ### Single trajectory
 
 ```bash

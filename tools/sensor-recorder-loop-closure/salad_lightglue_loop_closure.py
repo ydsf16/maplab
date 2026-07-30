@@ -8,6 +8,7 @@ import csv
 import json
 import math
 import itertools
+import os
 import time
 from collections import defaultdict
 from pathlib import Path
@@ -31,10 +32,10 @@ def arguments() -> argparse.Namespace:
     parser.add_argument("--superpoint-model", type=Path, help="Split SuperPoint ONNX model.")
     parser.add_argument("--lightglue-matcher-model", type=Path, help="Split LightGlue ONNX model.")
     parser.add_argument("--feature-cache", type=Path, help="Per-frame frontend SuperPoint cache directory.")
-    parser.add_argument("--salad-repo", type=Path, default=Path("/root/autodl-tmp/third_party/salad"))
-    parser.add_argument("--salad-checkpoint", type=Path, default=Path("/root/autodl-tmp/third_party/salad/dino_salad.ckpt"))
-    parser.add_argument("--dinov2-repo", type=Path, default=Path("/root/autodl-tmp/third_party/dinov2"))
-    parser.add_argument("--dinov2-checkpoint", type=Path, default=Path("/root/autodl-tmp/third_party/dinov2/dinov2_vitb14_pretrain.pth"))
+    parser.add_argument("--salad-repo", type=Path, default=Path(os.environ["PHONE_AI_SALAD_REPO"]))
+    parser.add_argument("--salad-checkpoint", type=Path, default=Path(os.environ["PHONE_AI_SALAD_CHECKPOINT"]))
+    parser.add_argument("--dinov2-repo", type=Path, default=Path(os.environ["PHONE_AI_DINOV2_REPO"]))
+    parser.add_argument("--dinov2-checkpoint", type=Path, default=Path(os.environ["PHONE_AI_DINOV2_CHECKPOINT"]))
     parser.add_argument("--top-k", type=int, default=10)
     parser.add_argument("--retrieval-pool-size", type=int, default=10,
                         help="SALAD candidates considered before adaptive similarity gating.")

@@ -2,14 +2,16 @@
 set -euo pipefail
 
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck disable=SC1091
+source "${repo_dir}/scripts/phoneai_env.sh"
 result=""
 force=0
 run_visual_ba=0
-runtime_root="${MAPLAB_RUNTIME_ROOT:-/root/autodl-tmp/maplab-focal}"
-runtime_workspace="${MAPLAB_RUNTIME_WORKSPACE:-/workspace}"
-salad_python="${SALAD_PYTHON:-/root/miniconda3/bin/python}"
-superpoint_model="${SUPERPOINT_ONNX_MODEL:-/root/autodl-tmp/third_party/LightGlue-ONNX-v1/weights/superpoint_2048.onnx}"
-lightglue_matcher_model="${LIGHTGLUE_MATCHER_ONNX_MODEL:-/root/autodl-tmp/third_party/LightGlue-ONNX-v1/weights/superpoint_lightglue.onnx}"
+runtime_root="${MAPLAB_RUNTIME_ROOT}"
+runtime_workspace="${MAPLAB_RUNTIME_WORKSPACE}"
+salad_python="${SALAD_PYTHON}"
+superpoint_model="${SUPERPOINT_ONNX_MODEL}"
+lightglue_matcher_model="${LIGHTGLUE_MATCHER_ONNX_MODEL}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -45,13 +47,15 @@ run_native() {
 run_native "$runtime_workspace/devel/lib/sensor_recorder_importer/sensor_recorder_vimap_export" \
   --map="$source_map" --output="$loops/source_export"
 
-TORCH_HOME="${TORCH_HOME:-/root/autodl-tmp/torch-hub}" \
+TORCH_HOME="${TORCH_HOME}" \
   "$salad_python" "$repo_dir/tools/sensor-recorder-loop-closure/salad_lightglue_loop_closure.py" \
   --normalized-data "$result/normalized" --optimized-dir "$loops/source_export" \
   --optimized-report "$source_stage/report.json" \
   --output "$loops" --superpoint-model "$superpoint_model" \
   --lightglue-matcher-model "$lightglue_matcher_model" \
   --feature-cache "$result/features/superpoint_lightglue/feature_cache" \
+  --salad-repo "${PHONE_AI_SALAD_REPO}" --salad-checkpoint "${PHONE_AI_SALAD_CHECKPOINT}" \
+  --dinov2-repo "${PHONE_AI_DINOV2_REPO}" --dinov2-checkpoint "${PHONE_AI_DINOV2_CHECKPOINT}" \
   --salad-batch-size 16
 
 if [[ ! -s "$loops/verified_loops.yaml" || "$(grep -c 'camera_from:' "$loops/verified_loops.yaml" || true)" -eq 0 ]]; then
