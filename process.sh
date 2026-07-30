@@ -70,6 +70,11 @@ if [[ "${1:-}" == "semantics" ]]; then
   exec "${repo_dir}/tools/sensor-recorder-semantics/run_semantics.sh" "$@"
 fi
 
+if [[ "${1:-}" == "multisession-geometry" ]]; then
+  shift
+  exec "${repo_dir}/tools/sensor-recorder-multisession/run_multisession_geometry.sh" "$@"
+fi
+
 if [[ "${1:-}" == "loop-closure" ]]; then
   shift
   exec "${repo_dir}/tools/sensor-recorder-loop-closure/run_loop_closure.sh" "$@"
