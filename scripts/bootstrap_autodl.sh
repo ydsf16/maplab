@@ -8,6 +8,7 @@ models_dir="${HOME}/data/phone-ai-models"
 runtime_archive="${PHONE_AI_MAPLAB_RUNTIME_ARCHIVE:-}"
 assets_archive="${PHONE_AI_ASSETS_ARCHIVE:-}"
 skip_models=0
+remove_local_archives=0
 downloaded_archives=()
 
 usage() {
@@ -19,6 +20,7 @@ usage: bash scripts/bootstrap_autodl.sh [options]
   --maplab-runtime-archive <file-or-url>
                                   Portable Maplab/ROS Noetic runtime archive.
   --assets-archive <file-or-url> Licensed Phone AI model/source asset archive.
+  --remove-local-archives         Remove supplied local archives after extraction.
   --skip-models                   Only prepare dependencies and runtime layout.
 
 The Maplab runtime is intentionally a separately versioned release asset.
@@ -32,6 +34,7 @@ while [[ $# -gt 0 ]]; do
     --models-dir) models_dir="$2"; shift 2 ;;
     --maplab-runtime-archive) runtime_archive="$2"; shift 2 ;;
     --assets-archive) assets_archive="$2"; shift 2 ;;
+    --remove-local-archives) remove_local_archives=1; shift ;;
     --skip-models) skip_models=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown option: $1" >&2; usage >&2; exit 2 ;;
@@ -52,15 +55,6 @@ apt-get install -y --no-install-recommends \
   ca-certificates curl git proot python3 python3-venv python3-pip \
   build-essential cmake pkg-config libgl1 libglib2.0-0 ffmpeg zstd
 
-if [[ ! -x "${venv_dir}/bin/python" ]]; then
-  python3 -m venv "${venv_dir}"
-fi
-"${venv_dir}/bin/python" -m pip install --upgrade pip wheel
-"${venv_dir}/bin/python" -m pip install \
-  numpy scipy opencv-python-headless onnxruntime-gpu faiss-gpu \
-  torch torchvision rerun-sdk pyyaml pillow tqdm \
-  open-clip-torch timm transformers jaxtyping spconv-cu126
-
 if [[ -n "${runtime_archive}" && ! -d "${runtime_dir}/maplab-focal" ]]; then
   archive="${runtime_dir}/maplab-runtime.tar.zst"
   if [[ "${runtime_archive}" =~ ^https?:// ]]; then
@@ -68,6 +62,7 @@ if [[ -n "${runtime_archive}" && ! -d "${runtime_dir}/maplab-focal" ]]; then
     downloaded_archives+=("${archive}")
   else
     archive="${runtime_archive}"
+    [[ "${remove_local_archives}" -eq 1 ]] && downloaded_archives+=("${archive}")
   fi
   mkdir -p "${runtime_dir}/maplab-focal"
   tar --use-compress-program=unzstd -xf "${archive}" -C "${runtime_dir}/maplab-focal" --strip-components=1
@@ -89,6 +84,7 @@ if [[ -n "${assets_archive}" ]]; then
     downloaded_archives+=("${archive}")
   else
     archive="${assets_archive}"
+    [[ "${remove_local_archives}" -eq 1 ]] && downloaded_archives+=("${archive}")
   fi
   tar --use-compress-program=unzstd -xf "${archive}" -C "${models_dir}" --strip-components=1
 fi
@@ -96,6 +92,15 @@ fi
 for archive in "${downloaded_archives[@]}"; do
   rm -f -- "${archive}"
 done
+
+if [[ ! -x "${venv_dir}/bin/python" ]]; then
+  python3 -m venv "${venv_dir}"
+fi
+"${venv_dir}/bin/python" -m pip install --upgrade pip wheel
+"${venv_dir}/bin/python" -m pip install \
+  numpy scipy opencv-python-headless onnxruntime-gpu faiss-gpu \
+  torch torchvision rerun-sdk pyyaml pillow tqdm \
+  open-clip-torch timm transformers jaxtyping spconv-cu126
 
 install -m 0644 "${repo_dir}/configs/runtime.env.example" "${repo_dir}/.phoneai.env"
 sed -i \
