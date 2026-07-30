@@ -2,7 +2,7 @@
 """Learned cross-session loops with per-session SE(3) RANSAC consensus."""
 from __future__ import annotations
 
-import argparse, csv, json, math, sys, time
+import argparse, csv, json, math, os, sys, time
 from collections import defaultdict
 from pathlib import Path
 
@@ -27,10 +27,10 @@ def args() -> argparse.Namespace:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--superpoint-model", type=Path, required=True)
     parser.add_argument("--lightglue-matcher-model", type=Path, required=True)
-    parser.add_argument("--salad-repo", type=Path, default=Path("/root/autodl-tmp/third_party/salad"))
-    parser.add_argument("--salad-checkpoint", type=Path, default=Path("/root/autodl-tmp/third_party/salad/dino_salad.ckpt"))
-    parser.add_argument("--dinov2-repo", type=Path, default=Path("/root/autodl-tmp/third_party/dinov2"))
-    parser.add_argument("--dinov2-checkpoint", type=Path, default=Path("/root/autodl-tmp/third_party/dinov2/dinov2_vitb14_pretrain.pth"))
+    parser.add_argument("--salad-repo", type=Path, default=Path(os.environ["PHONE_AI_SALAD_REPO"]))
+    parser.add_argument("--salad-checkpoint", type=Path, default=Path(os.environ["PHONE_AI_SALAD_CHECKPOINT"]))
+    parser.add_argument("--dinov2-repo", type=Path, default=Path(os.environ["PHONE_AI_DINOV2_REPO"]))
+    parser.add_argument("--dinov2-checkpoint", type=Path, default=Path(os.environ["PHONE_AI_DINOV2_CHECKPOINT"]))
     parser.add_argument("--top-k", type=int, default=10)
     parser.add_argument("--min-salad-similarity", type=float, default=0.0)
     parser.add_argument("--min-lightglue-score", type=float, default=0.15)

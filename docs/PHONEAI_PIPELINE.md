@@ -16,6 +16,12 @@ semantic point cloud.
 
 ## Single-session commands
 
+Before running commands in a new shell, load the local runtime layout:
+
+```bash
+source scripts/phoneai_env.sh
+```
+
 ```bash
 # 1. Import, learned features, local matching, initial VI-BA, loop closure,
 #    PGO-gated observation fusion, final VI-BA, and dense IMU/camera poses.

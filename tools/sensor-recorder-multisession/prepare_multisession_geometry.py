@@ -12,7 +12,7 @@ def main():
  p=argparse.ArgumentParser(); p.add_argument('--joint-output',type=Path,required=True); p.add_argument('--output',type=Path,required=True); p.add_argument('--window-size',type=int,default=20); p.add_argument('--window-overlap',type=int,default=4); a=p.parse_args()
  a.output.mkdir(parents=True,exist_ok=True); sessions=json.loads((a.joint_output/'sessions.json').read_text()); manifest={'coordinate':'Maplab RIGHT_HAND_Z_UP; DA3 extrinsic T_C_M','sessions':[],'windows':[]}
  for s in sessions:
-  sid=s['id']; result=Path(s['result']); raw=Path('/root/data/recorder')/sid
+  sid=s['id']; result=Path(s['result']); raw=Path(s['raw_data'])
   frames=list(csv.DictReader((result/'normalized/frames.csv').open())); tum=[pose(x) for x in (a.joint_output/'poses'/sid/'image_poses_tum.txt').read_text().splitlines() if x.strip()]; ts=np.array([x[0] for x in tum]); poses=[x[1] for x in tum]
   selected=[]; last=None
   for row in frames:

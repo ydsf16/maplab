@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# Shared runtime layout. Source this file from Phone AI entry points.
+
+_phone_ai_repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [[ -f "${_phone_ai_repo_dir}/.phoneai.env" ]]; then
+  # shellcheck disable=SC1091
+  source "${_phone_ai_repo_dir}/.phoneai.env"
+fi
+
+export PHONE_AI_HOME="${PHONE_AI_HOME:-${_phone_ai_repo_dir}}"
+export PHONE_AI_RUNTIME_DIR="${PHONE_AI_RUNTIME_DIR:-${HOME}/.local/share/phone-ai/runtime}"
+export PHONE_AI_MODELS_DIR="${PHONE_AI_MODELS_DIR:-${HOME}/.local/share/phone-ai/models}"
+export PHONE_AI_DATA_DIR="${PHONE_AI_DATA_DIR:-${HOME}/data}"
+export PHONE_AI_RECORDINGS_DIR="${PHONE_AI_RECORDINGS_DIR:-${PHONE_AI_DATA_DIR}/recordings}"
+
+export MAPLAB_RUNTIME_ROOT="${MAPLAB_RUNTIME_ROOT:-${PHONE_AI_RUNTIME_DIR}/maplab-focal}"
+export MAPLAB_RUNTIME_WORKSPACE="${MAPLAB_RUNTIME_WORKSPACE:-/workspace}"
+export MAPLAB_IMPORTER_BINARY="${MAPLAB_IMPORTER_BINARY:-${MAPLAB_RUNTIME_WORKSPACE}/devel/lib/sensor_recorder_importer/sensor_recorder_to_vimap}"
+export LIGHTGLUE_PYTHON="${LIGHTGLUE_PYTHON:-${PHONE_AI_RUNTIME_DIR}/venvs/lightglue/bin/python}"
+export SALAD_PYTHON="${SALAD_PYTHON:-${PHONE_AI_RUNTIME_DIR}/venvs/phone-ai/bin/python}"
+export RERUN_PYTHON="${RERUN_PYTHON:-${SALAD_PYTHON}}"
+export SUPERPOINT_ONNX_MODEL="${SUPERPOINT_ONNX_MODEL:-${PHONE_AI_MODELS_DIR}/lightglue/superpoint_2048.onnx}"
+export LIGHTGLUE_MATCHER_ONNX_MODEL="${LIGHTGLUE_MATCHER_ONNX_MODEL:-${PHONE_AI_MODELS_DIR}/lightglue/superpoint_lightglue.onnx}"
+export PHONE_AI_SALAD_REPO="${PHONE_AI_SALAD_REPO:-${PHONE_AI_MODELS_DIR}/salad/repo}"
+export PHONE_AI_SALAD_CHECKPOINT="${PHONE_AI_SALAD_CHECKPOINT:-${PHONE_AI_MODELS_DIR}/salad/dino_salad.ckpt}"
+export PHONE_AI_DINOV2_REPO="${PHONE_AI_DINOV2_REPO:-${PHONE_AI_MODELS_DIR}/dinov2/repo}"
+export PHONE_AI_DINOV2_CHECKPOINT="${PHONE_AI_DINOV2_CHECKPOINT:-${PHONE_AI_MODELS_DIR}/dinov2/dinov2_vitb14_pretrain.pth}"
+export TORCH_HOME="${TORCH_HOME:-${PHONE_AI_MODELS_DIR}/torch-hub}"
+export PHONE_AI_DA3_REPO="${PHONE_AI_DA3_REPO:-${PHONE_AI_MODELS_DIR}/da3/repo}"
+export PHONE_AI_DA3_MODEL="${PHONE_AI_DA3_MODEL:-${PHONE_AI_MODELS_DIR}/da3/DA3-GIANT-1.1}"
+export PHONE_AI_DA3_PYTHON="${PHONE_AI_DA3_PYTHON:-${PHONE_AI_RUNTIME_DIR}/venvs/phone-ai/bin/python}"
+export PHONE_AI_MOSAIC3D_ROOT="${PHONE_AI_MOSAIC3D_ROOT:-${PHONE_AI_MODELS_DIR}/mosaic3d}"
+
+unset _phone_ai_repo_dir

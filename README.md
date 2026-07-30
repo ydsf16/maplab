@@ -20,6 +20,54 @@ semantic inference, TUM exports, and Rerun visualization.
 install the external model assets before running it. Raw recordings and results
 are deliberately outside Git.
 
+## Fresh AutoDL deployment
+
+On a new GPU instance, clone the repository and run the bootstrap script with
+the separately published Maplab runtime archive:
+
+```bash
+git clone https://github.com/ydsf16/maplab-phone-ai.git
+cd maplab-phone-ai
+bash scripts/bootstrap_autodl.sh --maplab-runtime-archive <runtime-archive-url>
+bash scripts/check_runtime.sh
+```
+
+`bootstrap_autodl.sh` installs OS/Python dependencies, creates the portable
+runtime layout, and writes `.phoneai.env`. It keeps recordings and model assets
+outside Git. See `configs/runtime.env.example` for paths and environment-variable
+overrides. The Maplab runtime archive and upstream model assets are release
+artifacts with their own version and licence records.
+
+To create the Maplab runtime artifact from a validated builder instance:
+
+```bash
+source scripts/phoneai_env.sh
+bash scripts/package_maplab_runtime.sh \
+  --output /root/data/phone-ai-maplab-runtime-v0.1.0.tar.zst
+```
+
+Publish that archive to a release or shared storage, then pass its URL to the
+bootstrap command on a new instance.
+
+For fully offline setup, package the licensed model/source assets too:
+
+```bash
+bash scripts/package_phoneai_assets.sh \
+  --output /root/data/phone-ai-assets-v0.1.0.tar.zst
+```
+
+Then a fresh instance needs one command after cloning the repository:
+
+```bash
+bash scripts/bootstrap_autodl.sh \
+  --maplab-runtime-archive <runtime-url> \
+  --assets-archive <assets-url>
+```
+
+Only publish or share the asset archive when every included upstream model and
+weight licence permits redistribution. Keep a private archive for personal
+AutoDL deployment when a licence is restrictive.
+
 ### Single trajectory
 
 ```bash

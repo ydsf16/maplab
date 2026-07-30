@@ -2,12 +2,14 @@
 set -euo pipefail
 
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck disable=SC1091
+source "${repo_dir}/scripts/phoneai_env.sh"
 result=""
-extractor_model="${SUPERPOINT_ONNX_MODEL:-/root/autodl-tmp/third_party/LightGlue-ONNX-v1/weights/superpoint_2048.onnx}"
-matcher_model="${LIGHTGLUE_MATCHER_ONNX_MODEL:-/root/autodl-tmp/third_party/LightGlue-ONNX-v1/weights/superpoint_lightglue.onnx}"
-onnx_python="${LIGHTGLUE_PYTHON:-/root/autodl-tmp/venvs/lightglue/bin/python}"
-runtime_root="${MAPLAB_RUNTIME_ROOT:-/root/autodl-tmp/maplab-focal}"
-runtime_workspace="${MAPLAB_RUNTIME_WORKSPACE:-/workspace}"
+extractor_model="${SUPERPOINT_ONNX_MODEL}"
+matcher_model="${LIGHTGLUE_MATCHER_ONNX_MODEL}"
+onnx_python="${LIGHTGLUE_PYTHON}"
+runtime_root="${MAPLAB_RUNTIME_ROOT}"
+runtime_workspace="${MAPLAB_RUNTIME_WORKSPACE}"
 max_pair_gap=3
 matcher_workers="${LIGHTGLUE_MATCHER_WORKERS:-4}"
 force=0

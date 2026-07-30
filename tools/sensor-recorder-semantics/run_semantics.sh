@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck disable=SC1091
+source "${repo}/scripts/phoneai_env.sh"
 geometry=""; output=""
 while [[ $# -gt 0 ]]; do case "$1" in
   --geometry-output) geometry="$2"; shift 2;;
@@ -11,8 +13,8 @@ while [[ $# -gt 0 ]]; do case "$1" in
   *) echo "Unknown option: $1" >&2; exit 2;;
 esac; done
 [[ -n "$geometry" && -n "$output" ]] || { echo "--geometry-output and --output are required" >&2; exit 2; }
-py=/root/autodl-tmp/da3/venv/bin/python
-assets=/root/autodl-tmp/mosaic3d
+py="${PHONE_AI_DA3_PYTHON}"
+assets="${PHONE_AI_MOSAIC3D_ROOT}"
 mkdir -p "$output"
 PYTHONPATH="$assets/repo" "$py" "$repo/tools/sensor-recorder-semantics/mosaic3d_custom_infer.py" \
   --repo "$assets/repo" --checkpoint "$assets/models/sc+ar+sc++.ckpt" \
