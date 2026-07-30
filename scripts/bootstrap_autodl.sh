@@ -8,6 +8,7 @@ models_dir="${HOME}/data/phone-ai-models"
 runtime_archive="${PHONE_AI_MAPLAB_RUNTIME_ARCHIVE:-}"
 assets_archive="${PHONE_AI_ASSETS_ARCHIVE:-}"
 skip_models=0
+downloaded_archives=()
 
 usage() {
   cat <<EOF
@@ -64,6 +65,7 @@ if [[ -n "${runtime_archive}" && ! -d "${runtime_dir}/maplab-focal" ]]; then
   archive="${runtime_dir}/maplab-runtime.tar.zst"
   if [[ "${runtime_archive}" =~ ^https?:// ]]; then
     curl -L --fail --retry 3 "${runtime_archive}" -o "${archive}"
+    downloaded_archives+=("${archive}")
   else
     archive="${runtime_archive}"
   fi
@@ -84,11 +86,16 @@ if [[ -n "${assets_archive}" ]]; then
   archive="${runtime_dir}/phone-ai-assets.tar.zst"
   if [[ "${assets_archive}" =~ ^https?:// ]]; then
     curl -L --fail --retry 3 "${assets_archive}" -o "${archive}"
+    downloaded_archives+=("${archive}")
   else
     archive="${assets_archive}"
   fi
   tar --use-compress-program=unzstd -xf "${archive}" -C "${models_dir}" --strip-components=1
 fi
+
+for archive in "${downloaded_archives[@]}"; do
+  rm -f -- "${archive}"
+done
 
 install -m 0644 "${repo_dir}/configs/runtime.env.example" "${repo_dir}/.phoneai.env"
 sed -i \
