@@ -4,7 +4,13 @@ set -euo pipefail
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 python_bin="${PYTHON_BIN:-python3}"
 
-if [[ "${1:-}" == "full" ]]; then
+command="${1:-}"
+if [[ "${command}" == "full" ]]; then
+  echo "warning: 'process.sh full' is deprecated; use 'process.sh sfm'" >&2
+  command="sfm"
+fi
+
+if [[ "${command}" == "sfm" ]]; then
   shift
   data=""
   output=""
@@ -18,18 +24,18 @@ if [[ "${1:-}" == "full" ]]; then
       --force) force=1; shift ;;
       -h|--help)
         cat <<'EOF'
-usage: process.sh full --data <SensorRecorder folder> --output <result folder> [--config <camera json>] [--force]
+usage: process.sh sfm --data <SensorRecorder folder> --output <result folder> [--config <camera json>] [--force]
 
 Runs: validation/import -> SuperPoint+LightGlue -> initial VI-BA ->
 SALAD/LightGlue/PnP loop closure -> PGO -> PGO-gated observation fusion -> final VI-BA preview.
 The default camera configuration is configs/iphone_arkit_640.json.
 EOF
         exit 0 ;;
-      *) echo "unknown full-pipeline argument: $1" >&2; exit 2 ;;
+      *) echo "unknown sfm argument: $1" >&2; exit 2 ;;
     esac
   done
   [[ -n "${data}" && -n "${output}" ]] || {
-    echo "full requires --data and --output" >&2; exit 2;
+    echo "sfm requires --data and --output" >&2; exit 2;
   }
   import_args=(single --data "${data}" --output "${output}" --config "${config}")
   stage_args=(--output "${output}")
@@ -68,6 +74,11 @@ fi
 if [[ "${1:-}" == "semantics" ]]; then
   shift
   exec "${repo_dir}/tools/sensor-recorder-semantics/run_semantics.sh" "$@"
+fi
+
+if [[ "${1:-}" == "multisession-sfm" ]]; then
+  shift
+  exec "${repo_dir}/tools/sensor-recorder-multisession/run_multisession.sh" "$@"
 fi
 
 if [[ "${1:-}" == "multisession-geometry" ]]; then

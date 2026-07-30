@@ -19,27 +19,28 @@ semantic point cloud.
 ```bash
 # 1. Import, learned features, local matching, initial VI-BA, loop closure,
 #    PGO-gated observation fusion, final VI-BA, and dense IMU/camera poses.
-bash process.sh full --data /root/data/recorder/SR_xxx --output /root/data/maplab_results/SR_xxx_full --force
+bash process.sh sfm --data /root/data/recorder/SR_xxx --output /root/data/maplab_results/SR_xxx_sfm --force
 
 # 2. Windowed DA3 and globally fused TSDF.
-bash process.sh geometry --slam-output /root/data/maplab_results/SR_xxx_full --data /root/data/recorder/SR_xxx --output /root/data/maplab_results/SR_xxx_full/geometry --window-size 20 --window-overlap 4
+bash process.sh geometry --slam-output /root/data/maplab_results/SR_xxx_sfm --data /root/data/recorder/SR_xxx --output /root/data/maplab_results/SR_xxx_sfm/geometry --window-size 20 --window-overlap 4
 
 # 3. Pure-3D open-vocabulary semantic point cloud from TSDF.
-bash process.sh semantics --geometry-output /root/data/maplab_results/SR_xxx_full/geometry --output /root/data/maplab_results/SR_xxx_full/semantics_mosaic3d --profile indoor
+bash process.sh semantics --geometry-output /root/data/maplab_results/SR_xxx_sfm/geometry --output /root/data/maplab_results/SR_xxx_sfm/semantics_mosaic3d
 ```
 
 `geometry` loads DA3 once and processes all windows sequentially. Depth from
 every window is integrated into one TSDF; a window never defines a map boundary.
+`semantics` always uses the complete compact world class catalog.
 
 ## Multi-session commands
 
-Run `full` independently for every session, then combine their outputs with:
+Run `sfm` independently for every session, then combine their outputs with:
 
 ```bash
-bash tools/sensor-recorder-multisession/run_multisession.sh \
-  --session /root/data/maplab_results/SR_a_full \
-  --session /root/data/maplab_results/SR_b_full \
-  --session /root/data/maplab_results/SR_c_full \
+bash process.sh multisession-sfm \
+  --session /root/data/maplab_results/SR_a_sfm \
+  --session /root/data/maplab_results/SR_b_sfm \
+  --session /root/data/maplab_results/SR_c_sfm \
   --output /root/data/maplab_results/combined
 ```
 
@@ -59,8 +60,7 @@ bash process.sh multisession-geometry \
 # Mosaic3D operates once on the globally fused TSDF.
 bash process.sh semantics \
   --geometry-output /root/data/maplab_results/combined/25_multisession_geometry \
-  --output /root/data/maplab_results/combined/26_multisession_semantics_mosaic3d \
-  --profile indoor
+  --output /root/data/maplab_results/combined/26_multisession_semantics_mosaic3d
 ```
 
 `multisession-geometry` selects and windows frames within each Mission only,
