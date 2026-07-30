@@ -8,9 +8,13 @@ if [[ -f "${_phone_ai_repo_dir}/.phoneai.env" ]]; then
 fi
 
 export PHONE_AI_HOME="${PHONE_AI_HOME:-${_phone_ai_repo_dir}}"
-export PHONE_AI_RUNTIME_DIR="${PHONE_AI_RUNTIME_DIR:-${HOME}/.local/share/phone-ai/runtime}"
-export PHONE_AI_MODELS_DIR="${PHONE_AI_MODELS_DIR:-${HOME}/.local/share/phone-ai/models}"
-export PHONE_AI_DATA_DIR="${PHONE_AI_DATA_DIR:-${HOME}/data}"
+_phone_ai_default_data_dir="${HOME}/data"
+if [[ -d "${HOME}/autodl-tmp" ]]; then
+  _phone_ai_default_data_dir="${HOME}/autodl-tmp/phone-ai-data"
+fi
+export PHONE_AI_DATA_DIR="${PHONE_AI_DATA_DIR:-${_phone_ai_default_data_dir}}"
+export PHONE_AI_RUNTIME_DIR="${PHONE_AI_RUNTIME_DIR:-${PHONE_AI_DATA_DIR}/runtime}"
+export PHONE_AI_MODELS_DIR="${PHONE_AI_MODELS_DIR:-${PHONE_AI_DATA_DIR}/models}"
 export PHONE_AI_RECORDINGS_DIR="${PHONE_AI_RECORDINGS_DIR:-${PHONE_AI_DATA_DIR}/recordings}"
 
 export MAPLAB_RUNTIME_ROOT="${MAPLAB_RUNTIME_ROOT:-${PHONE_AI_RUNTIME_DIR}/maplab-focal}"
@@ -31,4 +35,4 @@ export PHONE_AI_DA3_MODEL="${PHONE_AI_DA3_MODEL:-${PHONE_AI_MODELS_DIR}/da3/DA3-
 export PHONE_AI_DA3_PYTHON="${PHONE_AI_DA3_PYTHON:-${PHONE_AI_RUNTIME_DIR}/venvs/phone-ai/bin/python}"
 export PHONE_AI_MOSAIC3D_ROOT="${PHONE_AI_MOSAIC3D_ROOT:-${PHONE_AI_MODELS_DIR}/mosaic3d}"
 
-unset _phone_ai_repo_dir
+unset _phone_ai_repo_dir _phone_ai_default_data_dir
