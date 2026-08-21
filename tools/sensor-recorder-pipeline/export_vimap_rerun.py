@@ -3,10 +3,24 @@
 import argparse
 import csv
 import json
+import os
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
+
+# Rerun is installed with AutoDL's system Python.  This guard makes the
+# exporter robust when an upstream shell accidentally invokes it from Conda or
+# a task-specific virtual environment.
+_rerun_python = "/usr/bin/python3"
+if (
+    os.path.isfile(_rerun_python)
+    and os.environ.get("PHONE_AI_RERUN_REEXEC") != "1"
+    and os.path.realpath(sys.executable) != _rerun_python
+):
+    os.environ["PHONE_AI_RERUN_REEXEC"] = "1"
+    os.execv(_rerun_python, [_rerun_python, __file__, *sys.argv[1:]])
 
 import numpy as np
 import rerun as rr

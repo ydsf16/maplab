@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
-import csv, json, shutil
+import csv, json, os, shutil, sys
 from pathlib import Path
+
+_rerun_python = "/usr/bin/python3"
+if os.path.isfile(_rerun_python) and os.environ.get("PHONE_AI_RERUN_REEXEC") != "1" and os.path.realpath(sys.executable) != _rerun_python:
+    os.environ["PHONE_AI_RERUN_REEXEC"] = "1"
+    os.execv(_rerun_python, [_rerun_python, __file__, *sys.argv[1:]])
+
 import numpy as np
 import rerun as rr
 

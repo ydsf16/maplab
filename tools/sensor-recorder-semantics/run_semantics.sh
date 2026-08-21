@@ -23,7 +23,7 @@ PYTHONPATH="$assets/repo" "$py" "$repo/tools/sensor-recorder-semantics/mosaic3d_
   --class-catalog "$repo/tools/sensor-recorder-semantics/semantic_ontology_compact_v1.json" \
   --profile all --world-coordinate maplab_z_up
 camera_args=(); while IFS= read -r camera; do camera_args+=(--camera-npz "$camera"); done < <(find "$geometry/windows" -path '*/input/camera_params.npz' | sort)
-python3 "$repo/tools/sensor-recorder-semantics/export_mosaic3d_rerun.py" \
+"${RERUN_PYTHON}" "$repo/tools/sensor-recorder-semantics/export_mosaic3d_rerun.py" \
   --semantic-npz "$output/semantic_scene.npz" --class-names "$output/class_names.json" \
   --stats "$output/semantic_stats.json" "${camera_args[@]}" --output "$output/rerun_semantic.rrd"
 python3 -m rerun rrd verify "$output/rerun_semantic.rrd"

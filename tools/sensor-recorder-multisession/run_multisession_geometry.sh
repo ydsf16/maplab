@@ -1,14 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
-repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"; joint=""; output=""
+repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"; joint=""; output=""; keep_intermediates=0
 # shellcheck disable=SC1091
 source "${repo}/scripts/phoneai_env.sh"
-while [[ $# -gt 0 ]]; do case "$1" in --joint-output) joint="$2";shift 2;;--output) output="$2";shift 2;;*) exit 2;;esac;done
+while [[ $# -gt 0 ]]; do case "$1" in --joint-output) joint="$2";shift 2;;--output) output="$2";shift 2;;--keep-intermediates) keep_intermediates=1;shift;;*) exit 2;;esac;done
 [[ -n "$joint" && -n "$output" ]] || exit 2
 py="${PHONE_AI_DA3_PYTHON}"; "$py" "$repo/tools/sensor-recorder-multisession/prepare_multisession_geometry.py" --joint-output "$joint" --output "$output"
 in=(); out=(); npz=(); imgs=(); while IFS= read -r d; do in+=(--input "$d"); out+=(--output "${d%/input}/da3_output"); npz+=(--npz "${d%/input}/da3_output/exports/mini_npz/results.npz"); imgs+=(--images "$d/images"); done < <(find "$output/windows" -path '*/input' -type d | sort)
 "$py" "$repo/tools/sensor-recorder-geometry/run_da3_windows.py" "${in[@]}" "${out[@]}" --process-res 504
 "$py" "$repo/tools/sensor-recorder-geometry/fuse_da3_tsdf.py" "${npz[@]}" "${imgs[@]}" --output "$output/tsdf"
 cams=(); while IFS= read -r c; do cams+=(--camera "$c"); done < <(find "$output/windows" -path '*/input/camera_params.npz' | sort)
-python3 "$repo/tools/sensor-recorder-geometry/export_geometry_rerun.py" --ply "$output/tsdf/tsdf_pointcloud.ply" "${cams[@]}" --output "$output/rerun_multisession_geometry.rrd"
-python3 -m rerun rrd verify "$output/rerun_multisession_geometry.rrd"
+"${RERUN_PYTHON}" "$repo/tools/sensor-recorder-geometry/export_geometry_rerun.py" --ply "$output/tsdf/tsdf_pointcloud.ply" "${cams[@]}" --output "$output/rerun_multisession_geometry.rrd"
+"${RERUN_PYTHON}" -m rerun rrd verify "$output/rerun_multisession_geometry.rrd"
+if [[ "$keep_intermediates" -eq 0 ]]; then
+  rm -rf -- "$output/windows"
+  rm -f -- "$output/tsdf/tsdf_mesh_raw.ply"
+  echo "cleaned DA3 windows and raw mesh; pass --keep-intermediates to retain them"
+fi

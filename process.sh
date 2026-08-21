@@ -83,6 +83,11 @@ if [[ "${1:-}" == "multisession-sfm" ]]; then
   exec "${repo_dir}/tools/sensor-recorder-multisession/run_multisession.sh" "$@"
 fi
 
+if [[ "${1:-}" == "multisession" ]]; then
+  shift
+  exec "${repo_dir}/tools/sensor-recorder-multisession/run_multisession_full.sh" "$@"
+fi
+
 if [[ "${1:-}" == "multisession-geometry" ]]; then
   shift
   exec "${repo_dir}/tools/sensor-recorder-multisession/run_multisession_geometry.sh" "$@"
