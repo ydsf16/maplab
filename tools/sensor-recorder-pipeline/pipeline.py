@@ -777,7 +777,15 @@ def export_rerun(context: Context) -> Dict[str, Any]:
     if not images_dir.is_dir():
         raise PipelineError(f"Rerun keyframe image directory is missing: {images_dir}")
 
-    rerun_python = os.environ.get("RERUN_PYTHON", sys.executable)
+    # AutoDL's system Python is packaged with the validated Rerun SDK.  Prefer
+    # it over a stale Conda/venv RERUN_PYTHON inherited from an SSH session.
+    # PHONE_AI_RERUN_PYTHON remains an explicit override for other platforms.
+    rerun_python = os.environ.get("PHONE_AI_RERUN_PYTHON")
+    if not rerun_python and Path("/usr/bin/python3").is_file():
+        rerun_python = "/usr/bin/python3"
+    if not rerun_python:
+        rerun_python = os.environ.get("RERUN_PYTHON", sys.executable)
+    print(f"[run]  export_rerun_python={rerun_python}", flush=True)
     dependency_check = subprocess.run(
         [rerun_python, "-c", "import rerun"], check=False,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,

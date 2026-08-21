@@ -62,7 +62,16 @@ fi
 if [[ "${force}" -eq 1 ]]; then
   rm -rf -- "${features}" "${stage}"
 fi
-mkdir -p "${features}" "${stage}" "$(dirname "${rrd}")"
+mkdir -p "${features}" "$(dirname "${stage}")" "$(dirname "${rrd}")"
+
+# A copied VI-Map still carries resource metadata from its source directory.
+# Optimizing it in-place below result/maps can leave Maplab with stale
+# raw-image resource references. Build the map in an isolated directory and
+# only publish it after Maplab has saved a consistent map.
+stage_work="$(mktemp -d /tmp/phoneai-vimap-stage.XXXXXX)"
+trap 'rm -rf -- "${stage_work}"' EXIT
+working_map="${stage_work}/vi_map"
+working_report="${stage_work}/report.json"
 
 "${onnx_python}" "${repo_dir}/tools/sensor-recorder-features/superpoint_lightglue_onnx.py" \
   --normalized-data "${result}/normalized" \
@@ -73,7 +82,7 @@ mkdir -p "${features}" "${stage}" "$(dirname "${rrd}")"
   --matcher-workers "${matcher_workers}" \
   --provider cuda
 
-cp -a "${result}/maps/00_imported/vi_map" "${stage}/vi_map"
+cp -a "${result}/maps/00_imported/vi_map" "${working_map}"
 ba_arguments=(--run_ba=false)
 if [[ "${visual_ba}" -eq 1 ]]; then
   ba_arguments=(
@@ -94,13 +103,20 @@ elif [[ "${initial_vi_ba}" -eq 1 ]]; then
     --ba_outlier_rejection_reject_every_n_iters=3
   )
 fi
-proot -R "${runtime_root}" -b "${result}:${result}" -w "${runtime_workspace}" \
+proot -R "${runtime_root}" -b "${result}:${result}" -b "${stage_work}:${stage_work}" -w "${runtime_workspace}" \
   /bin/bash -lc \
   'source /opt/ros/noetic/setup.bash; source /workspace/devel/setup.bash; "$@"' \
   bash "${runtime_workspace}/devel/lib/sensor_recorder_importer/sensor_recorder_brisk_ba" \
-  --map="${stage}/vi_map" --report="${stage}/report.json" \
+  --map="${working_map}" --report="${working_report}" \
   --run_frontend=false --tracks_csv="${features}/keypoints.csv" \
   --prune_bad_landmarks=true "${ba_arguments[@]}"
+
+rm -rf -- "${stage}"
+mkdir -p "${stage}"
+mv "${working_map}" "${stage}/vi_map"
+mv "${working_report}" "${stage}/report.json"
+trap - EXIT
+rmdir "${stage_work}"
 
 mkdir -p "${stage}/export"
 proot -R "${runtime_root}" -b "${result}:${result}" -w "${runtime_workspace}" \
