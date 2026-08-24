@@ -18,18 +18,21 @@ if [[ "${command}" == "sfm" ]]; then
   output=""
   config="${repo_dir}/configs/iphone_arkit_640.json"
   force=0
+  skip_loops=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --data) data="$2"; shift 2 ;;
       --output) output="$2"; shift 2 ;;
       --config) config="$2"; shift 2 ;;
       --force) force=1; shift ;;
+      --skip-loops) skip_loops=1; shift ;;
       -h|--help)
         cat <<'EOF'
-usage: process.sh sfm --data <SensorRecorder folder> --output <result folder> [--config <camera json>] [--force]
+usage: process.sh sfm --data <SensorRecorder folder> --output <result folder> [--config <camera json>] [--skip-loops] [--force]
 
 Runs: validation/import -> SuperPoint+LightGlue -> initial VI-BA ->
 SALAD/LightGlue/PnP loop closure -> PGO -> PGO-gated observation fusion -> final VI-BA preview.
+With --skip-loops, stops at the initial VI-BA and exports its dense poses.
 The default camera configuration is configs/iphone_arkit_640.json.
 EOF
         exit 0 ;;
@@ -51,9 +54,14 @@ EOF
   import_end="$(date +%s)"
   "${repo_dir}/tools/sensor-recorder-features/run_superpoint_lightglue.sh" "${stage_args[@]}" --initial-vi-ba
   frontend_vi_ba_end="$(date +%s)"
-  "${repo_dir}/tools/sensor-recorder-loop-closure/run_loop_closure.sh" "${stage_args[@]}"
-  loop_end="$(date +%s)"
-  "${repo_dir}/tools/sensor-recorder-pipeline/run_pose_export.sh" --output "${output}"
+  if [[ "${skip_loops}" -eq 1 ]]; then
+    loop_end="${frontend_vi_ba_end}"
+    "${repo_dir}/tools/sensor-recorder-pipeline/run_pose_export.sh" --output "${output}" --stage initial
+  else
+    "${repo_dir}/tools/sensor-recorder-loop-closure/run_loop_closure.sh" "${stage_args[@]}"
+    loop_end="$(date +%s)"
+    "${repo_dir}/tools/sensor-recorder-pipeline/run_pose_export.sh" --output "${output}"
+  fi
   full_end="$(date +%s)"
   printf 'stage\twall_seconds\nimport\t%s\nfrontend_and_initial_vi_ba\t%s\nloop_pgo_fusion_and_final_vi_ba\t%s\npose_export\t%s\ntotal\t%s\n' \
     "$((import_end - full_start))" "$((frontend_vi_ba_end - import_end))" \
@@ -70,7 +78,7 @@ fi
 
 if [[ "${1:-}" == "geometry" ]]; then
   shift
-  exec "${repo_dir}/tools/sensor-recorder-geometry/run_geometry.sh" "$@"
+  exec "${repo_dir}/tools/sensor-recorder-geometry/run_geometry_sim3.sh" "$@"
 fi
 
 if [[ "${1:-}" == "semantics" ]]; then

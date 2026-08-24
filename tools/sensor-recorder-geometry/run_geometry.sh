@@ -1,19 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
-repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"; slam=""; data=""; output=""; res=504; window_size=20; overlap=4; keep_intermediates=0
+repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"; slam=""; data=""; output=""; res=504; window_size=20; overlap=4; keep_intermediates=0; slam_stage=auto
 # shellcheck disable=SC1091
 source "${repo}/scripts/phoneai_env.sh"
-while [[ $# -gt 0 ]]; do case "$1" in --slam-output) slam="$2";shift 2;; --data) data="$2";shift 2;; --output) output="$2";shift 2;; --process-res) res="$2";shift 2;; --window-size) window_size="$2";shift 2;; --window-overlap) overlap="$2";shift 2;; --keep-intermediates) keep_intermediates=1;shift;; *) echo "Unknown option: $1" >&2; exit 2;; esac; done
+while [[ $# -gt 0 ]]; do case "$1" in --slam-output) slam="$2";shift 2;; --data) data="$2";shift 2;; --output) output="$2";shift 2;; --process-res) res="$2";shift 2;; --window-size) window_size="$2";shift 2;; --window-overlap) overlap="$2";shift 2;; --slam-stage) slam_stage="$2";shift 2;; --keep-intermediates) keep_intermediates=1;shift;; *) echo "Unknown option: $1" >&2; exit 2;; esac; done
 [[ -n "$slam" && -n "$data" && -n "$output" ]] || exit 2
 (( window_size > overlap && overlap >= 0 )) || { echo "window-size must exceed window-overlap" >&2; exit 2; }
+[[ "$slam_stage" == auto || "$slam_stage" == initial || "$slam_stage" == final ]] || { echo "slam-stage must be auto, initial, or final" >&2; exit 2; }
 py="${PHONE_AI_DA3_PYTHON}"; mkdir -p "$output/windows"
-selection="$output/_selection"; "$py" "$repo/tools/sensor-recorder-geometry/prepare_da3_input.py" --slam-output "$slam" --data "$data" --output "$selection" --max-frames 0 --metadata-only
+selection="$output/_selection"; "$py" "$repo/tools/sensor-recorder-geometry/prepare_da3_input.py" --slam-output "$slam" --data "$data" --output "$selection" --slam-stage "$slam_stage" --max-frames 0 --metadata-only
 frame_count=$(python3 -c "import json; print(json.load(open('$selection/manifest.json'))['frames'])")
 npz_args=(); image_args=(); da3_input_args=(); da3_output_args=(); start=0; window_id=0
 while (( start < frame_count )); do
   end=$((start + window_size)); (( end > frame_count )) && end=$frame_count
   work="$output/windows/window_$(printf '%03d' "$window_id")"; mkdir -p "$work"
-  "$py" "$repo/tools/sensor-recorder-geometry/prepare_da3_input.py" --slam-output "$slam" --data "$data" --output "$work/input" --max-frames 0 --start-index "$start" --end-index "$end"
+  "$py" "$repo/tools/sensor-recorder-geometry/prepare_da3_input.py" --slam-output "$slam" --data "$data" --output "$work/input" --slam-stage "$slam_stage" --max-frames 0 --start-index "$start" --end-index "$end"
   da3_input_args+=(--input "$work/input"); da3_output_args+=(--output "$work/da3_output")
   npz_args+=(--npz "$work/da3_output/exports/mini_npz/results.npz"); image_args+=(--images "$work/input/images")
   (( end == frame_count )) && break
